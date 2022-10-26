@@ -162,7 +162,7 @@ coldstart: $(COLDSTART_DEPS)
 ifeq "$(BOOTSTRAPPING_FLEXDLL)" "false"
 	$(MAKE) -C runtime all
 	$(MAKE) -C stdlib \
-	  OCAMLRUN='$$(ROOTDIR)/runtime/ocamlrun$(EXE)' \
+	  OCAMLRUN='node $$(ROOTDIR)/runtime/ocamlrun$(EXE)' \
 	  CAMLC='$$(BOOT_OCAMLC) $(USE_RUNTIME_PRIMS)' all
 else
 	$(MAKE) -C stdlib OCAMLRUN='$$(ROOTDIR)/boot/ocamlruns$(EXE)' \

@@ -46,8 +46,8 @@ FLEXDLL_SUBMODULE_PRESENT := $(wildcard $(ROOTDIR)/flexdll/Makefile)
 # Boot/ocamlrun is the most frequently used in the build system, so
 # we use OCAMLRUN to designate it and keep NEW_OCAMLRUN to refer
 # to runtime/ocamlrun, because it's less frequently used.
-OCAMLRUN ?= $(ROOTDIR)/boot/ocamlrun$(EXE)
-NEW_OCAMLRUN ?= $(ROOTDIR)/runtime/ocamlrun$(EXE)
+OCAMLRUN ?= node $(ROOTDIR)/boot/ocamlrun$(EXE)
+NEW_OCAMLRUN ?= node $(ROOTDIR)/runtime/ocamlrun$(EXE)
 
 TEST_BOOT_OCAMLC_OPT = $(shell \
   test $(ROOTDIR)/boot/ocamlc.opt -nt $(ROOTDIR)/boot/ocamlc; \

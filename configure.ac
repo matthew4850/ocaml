@@ -841,6 +841,8 @@ AS_CASE([$cc_basename,$host],
     AC_DEFINE([HAS_ARCH_CODE32], [1])],
   [gcc*,powerpc-*-linux*],
     [oc_ldflags="-mbss-plt"],
+  [*,*-emscripten],
+  [mkexe="$mkexe -sNODERAWFS=1 -sALLOW_MEMORY_GROWTH=1"]
 )
 
 
@@ -1142,6 +1144,8 @@ AS_CASE([$host],
     [arch=amd64; system=cygwin],
   [riscv64-*-linux*],
     [arch=riscv; model=riscv64; system=linux]
+  [wasm32-*-emscripten],
+    [arch=wasm32; system=emscripten]
 )
 
 AS_IF([test x"$enable_native_compiler" = "xno"],
