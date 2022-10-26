@@ -1,0 +1,16 @@
+# 2 "asmcomp/wasm64/emit.mlp"
+
+let fundecl _fundecl =
+  failwith "not implemented"
+
+(* Emission of data *)
+let data _l =
+  failwith "not implemented"
+
+(* Beginning / end of an assembly file *)
+
+let begin_assembly() =
+  failwith "not implemented"
+
+let end_assembly() =
+  failwith "not implemented"
