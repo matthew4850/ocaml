@@ -132,6 +132,11 @@ _build
 /ocamltest/ocamltest.html
 
 /otherlibs/*/.dep
+/otherlibs/binaryen/*.ml
+/otherlibs/binaryen/*.mli
+/otherlibs/binaryen/*.c
+/otherlibs/binaryen/*.h
+/otherlibs/binaryen/*.def
 /otherlibs/dynlink/extract_crc
 /otherlibs/dynlink/dynlink_platform_intf.mli
 /otherlibs/dynlink/byte/dynlink.mli
