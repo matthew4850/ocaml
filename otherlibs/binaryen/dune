@@ -1,0 +1,19 @@
+(ignored_subdirs (binaryen_ml))
+
+(rule
+ (targets type.ml expression.ml literal.ml global.ml table.ml function.ml
+          import.ml op.ml memory.ml element_segment.ml export.ml passes.ml
+          settings.ml module.ml)
+ (mode    fallback)
+ (deps    (glob_files binaryen_ml/src/*.ml))
+ (action  (bash "cp binaryen_ml/src/*.ml ."))
+)
+
+(rule
+ (targets type.mli expression.mli literal.mli global.mli table.mli function.mli
+          import.mli op.mli memory.mli element_segment.mli export.mli passes.mli
+          settings.mli module.mli)
+ (mode    fallback)
+ (deps    (glob_files binaryen_ml/src/*.mli))
+ (action  (bash "cp binaryen_ml/src/*.mli ."))
+)

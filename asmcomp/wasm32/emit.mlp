@@ -1,4 +1,4 @@
-# 2 "asmcomp/wasm64/emit.mlp"
+# 2 "asmcomp/wasm32/emit.mlp"
 
 let fundecl _fundecl =
   failwith "not implemented"
@@ -14,3 +14,4 @@ let begin_assembly() =
 
 let end_assembly() =
   failwith "not implemented"
+

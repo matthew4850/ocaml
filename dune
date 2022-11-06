@@ -32,6 +32,7 @@
 (copy_files# middle_end/closure/*.ml{,i})
 (copy_files# middle_end/flambda/*.ml{,i})
 (copy_files# middle_end/flambda/base_types/*.ml{,i})
+(copy_files# otherlibs/binaryen/*.ml{,i})
 
 (library
  (name ocamlcommon)
@@ -141,10 +142,21 @@
 )
 
 (library
+ (name binaryen)
+ (wrapped false)
+ (flags (:standard -principal -nostdlib))
+ (libraries stdlib)
+ (modules
+   type expression literal global table function import op
+   memory element_segment export passes settings module
+ )
+)
+
+(library
  (name ocamloptcomp)
  (wrapped false)
  (flags (:standard -principal -nostdlib))
- (libraries stdlib ocamlcommon ocamlmiddleend)
+ (libraries stdlib ocamlcommon ocamlmiddleend binaryen)
  (modules_without_implementation x86_ast emitenv)
  (modules
    ;; asmcomp/
