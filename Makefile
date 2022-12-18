@@ -162,7 +162,7 @@ coldstart: $(COLDSTART_DEPS)
 ifeq "$(BOOTSTRAPPING_FLEXDLL)" "false"
 	$(MAKE) -C runtime all
 	$(MAKE) -C stdlib \
-	  OCAMLRUN='node $$(ROOTDIR)/runtime/ocamlrun$(EXE)' \
+	  OCAMLRUN='node --experimental-wasm-memory64 $$(ROOTDIR)/runtime/ocamlrun$(EXE)' \
 	  CAMLC='$$(BOOT_OCAMLC) $(USE_RUNTIME_PRIMS)' all
 else
 	$(MAKE) -C stdlib OCAMLRUN='$$(ROOTDIR)/boot/ocamlruns$(EXE)' \
@@ -641,7 +641,7 @@ partialclean::
 otherlibs/binaryen/binaryen.cma:
 	$(MAKE) -C otherlibs/binaryen all
 
-ifneq ($(ARCH), wasm32)
+ifneq ($(ARCH), wasm32-test)
 ocamlopt$(EXE): compilerlibs/ocamlcommon.cma compilerlibs/ocamloptcomp.cma \
           $(OPTSTART)
 	$(CAMLC) $(LINKFLAGS) -o $@ $^

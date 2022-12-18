@@ -1144,7 +1144,7 @@ AS_CASE([$host],
     [arch=amd64; system=cygwin],
   [riscv64-*-linux*],
     [arch=riscv; model=riscv64; system=linux]
-  [wasm32-*-emscripten],
+  [wasm64-*-emscripten],
     [arch=wasm32; system=emscripten]
 )
 
@@ -1955,6 +1955,11 @@ AS_IF([test x"$enable_function_sections" = "xno"],
       [AC_MSG_ERROR([Function sections are not supported.])],
       [AC_MSG_NOTICE([Disabling function sections.])])],
     [])])
+
+AS_CASE(["$system"],
+  [emscripten],
+    [common_cflags="$common_cflags"],
+)
 
 AS_IF([test x"$with_afl" = "xyes"],
   [afl=true],

@@ -246,11 +246,11 @@ ASMCOMP = \
   driver/optmaindriver.cmo
 ASMCOMP_CMI = $(ARCH_SPECIFIC_ASMCOMP_CMI)
 
-ifeq ($(ARCH), wasm32)
-  asmcomp/CSE.cmo asmcomp/arch.cmo asmcomp/emit.cmo \
-    asmcomp/proc.cmo asmcomp/reload.cmo asmcomp/scheduling.cmo selection.cmo: \
-    INCLUDES+=-I otherlibs/binaryen
-endif
+# ifeq ($(ARCH), wasm32)
+#   asmcomp/CSE.cmo asmcomp/arch.cmo asmcomp/emit.cmo \
+#     asmcomp/proc.cmo asmcomp/reload.cmo asmcomp/scheduling.cmo selection.cmo: \
+#     INCLUDES+=-I otherlibs/binaryen
+# endif
 
 # Files under middle_end/ are not to reference files under asmcomp/.
 # This ensures that the middle end can be linked (e.g. for objinfo) even when

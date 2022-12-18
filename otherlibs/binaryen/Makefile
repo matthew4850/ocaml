@@ -46,7 +46,8 @@ $(COBJS:.$(O)=.c): $(CHEADERS) wasm-delegations.def
 
 binaryen/lib/libbinaryen.a:
 	emcmake cmake -S binaryen -B binaryen -G "Unix Makefiles" \
-		"-DCMAKE_CXX_FLAGS=-Wno-unused-variable -Wno-maybe-uninitialized" \
+		"-DCMAKE_CXX_FLAGS=-Wno-unused-variable -Wno-maybe-uninitialized\
+    -fwasm-exceptions -sDISABLE_EXCEPTION_CATCHING=1" \
 		-DBUILD_TESTS=OFF -DBUILD_TOOLS=OFF -DBUILD_STATIC_LIB=ON \
 		-DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=binaryen
 	$(MAKE) -C binaryen

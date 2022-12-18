@@ -20,7 +20,7 @@ let is_immediate _n = true
 
 let big_endian = false
 
-let size_addr = 4
+let size_addr = 8
 let size_int = 8
 let size_float = 8
 

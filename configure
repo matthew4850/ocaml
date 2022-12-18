@@ -15131,7 +15131,7 @@ fi; system=elf ;; #(
     arch=amd64; system=cygwin ;; #(
   riscv64-*-linux*) :
     arch=riscv; model=riscv64; system=linux
-  wasm32-*-emscripten ;; #(
+  wasm64-*-emscripten ;; #(
   *) :
     arch=wasm32; system=emscripten
  ;;
@@ -18820,6 +18820,13 @@ printf "%s\n" "$as_me: Disabling function sections." >&6;}
 fi
 fi
 fi
+
+case "$system" in #(
+  emscripten) :
+    common_cflags="$common_cflags" ;; #(
+  *) :
+     ;;
+esac
 
 if test x"$with_afl" = "xyes"
 then :
