@@ -272,18 +272,312 @@ let reloop instructions : wasm_instruction list =
   mk_instr (Wloop (-2)) :: blocks @ mk_instr (Wblock switch_block)
     :: (mk_instr ~arg:([|loop_idx_reg|]) (Wswitch labels)) :: (mk_instr Wendblock) :: a @ [mk_instr Wendloop; mk_instr Wunreachable]
 
-type cfg = {
-  label : label;
-  body : instruction_desc list
-}
+module LblSet = Stdlib.Set.Make(Int)
+module Cfg : sig
+  module Node :
+    sig
+      type t
+      val get_label : t -> label
+      val get_body : t -> wasm_instruction list
+      val set_body : t -> wasm_instruction list -> unit
+    end
+  type t
+  type control_flow = [\`Branch | \`Condbranch of test ]
+  val cfg_of_instructions : Linear.instruction -> t
+  val dag_of_cfg : t -> t * (label * label) list
+  val get_adjacent_nodes : t -> label -> label list
+  val iter_nodes : t -> (label -> unit) -> unit
+  val get_node : t -> label -> Node.t
+  val get_edge_instr : t -> label -> label -> instruction option * control_flow
+end = struct
+  module Node : sig
+    type t
+    val get_label : t -> label
+    val make : label -> wasm_instruction list -> t
+    val get_body : t -> wasm_instruction list
+    val set_body : t -> wasm_instruction list -> unit
+  end = struct
+    type t = {
+      label: label;
+      mutable body: wasm_instruction list
+    }
+    let get_label t = t.label
+    let make label body = { label; body; }
+    let get_body t = t.body
+    let set_body t body = t.body <- body
+  end
+
+  type control_flow = [\`Branch | \`Condbranch of test]
+
+  type t = {
+    entry: label;
+    nodes: (label, Node.t) Hashtbl.t;
+    edges: (label * label * instruction option * control_flow) list;
+    adjacency_list: (label, label list) Hashtbl.t
+  }
+
+  let create_adjacency_list nodes edges =
+    let adjacency_list = Hashtbl.create (Hashtbl.length nodes) in
+    Hashtbl.iter (fun label _ -> Hashtbl.add adjacency_list label []) nodes;
+    List.iter (fun (src, dst, _, _) ->
+      Hashtbl.replace adjacency_list src (dst :: Hashtbl.find adjacency_list src)) edges;
+    adjacency_list
+
+  let get_adjacent_nodes t lbl =
+    Hashtbl.find t.adjacency_list lbl
+
+  let iter_nodes t f =
+    Hashtbl.iter (fun label _ -> f label) t.nodes
+
+  let get_node t l =
+    Hashtbl.find t.nodes l
+
+  let get_edge_instr t src dst =
+    let (_, _,i, control_flow) = List.find (fun (a, b, _, _) -> a = src && b = dst) t.edges in
+    i, control_flow
+
+  let get_back_edges cfg =
+    let dfs cfg f init =
+      let visited = Hashtbl.create 10 in
+
+      let rec visit src f acc =
+        if not (Hashtbl.mem visited src) then begin
+          Hashtbl.add visited src ();
+          List.iter (fun dst ->
+              visit dst f (f src dst acc)
+            ) (Hashtbl.find cfg.adjacency_list src);
+        end
+      in
+      visit cfg.entry f init
+    in
+    let back_edges = ref [] in
+    let f src dst visited =
+      match LblSet.mem dst visited with
+      | true ->
+          back_edges := (src, dst) :: !back_edges;
+          visited
+      | false -> LblSet.add src visited
+    in
+    dfs cfg f LblSet.empty;
+    !back_edges
+
+  let cfg_of_instructions instructions =
+    let convert { desc; next; arg; res; dbg; live } =
+      let convert = function
+      | Lprologue -> Wprologue
+      | Lend -> Wend
+      | Lop op -> Wop op
+      | Lreloadretaddr -> Wend (* assert false *)
+      | Lreturn -> Wreturn
+      | Llabel _ -> assert false
+      | Lbranch _ -> assert false
+      | Lcondbranch(_, _) -> assert false
+      | Lcondbranch3(_, _, _) -> assert false
+      | Lswitch jumptbl -> Wswitch jumptbl
+      | Lraise k -> Wraise k
+      | Lentertrap
+      | Ladjust_trap_depth _
+      | Lpushtrap _
+      | Lpoptrap -> assert false
+      in
+      { desc = convert desc; arg; res; dbg; live; }
+    in
+    let entry = new_label () in
+    let nodes = Hashtbl.create 10 in
+    let add_cfg lbl instructions =
+      (* Hashtbl.add nodes lbl Node.{ label = lbl; body = List.rev instructions } *)
+      Hashtbl.add nodes lbl (Node.make lbl (List.rev instructions))
+    in
+    let edges = ref [] in
+    let rec instructions_to_cfg current current_lbl = function
+    | Linear.{ desc = Lend } -> add_cfg current_lbl current
+    | { desc = Lbranch lbl; next } as i ->
+        let new_lbl = new_label () in
+        add_cfg current_lbl current;
+        edges := (current_lbl, new_lbl, None, \`Branch) :: (current_lbl, lbl, Some i, \`Branch) :: !edges;
+        instructions_to_cfg [] new_lbl next
+    | { desc = Lcondbranch (tst, lbl); next } as i ->
+        let new_lbl = new_label () in
+        add_cfg current_lbl current;
+        edges := (current_lbl, new_lbl, None, \`Branch) :: (current_lbl, lbl, Some i, \`Condbranch tst) :: !edges;
+        instructions_to_cfg [] new_lbl next
+    | { desc = Lswitch _; next } ->
+        assert false
+    | { desc = Llabel lbl; next } ->
+        add_cfg current_lbl current;
+        edges := (current_lbl, lbl, None, \`Branch) :: !edges;
+        instructions_to_cfg [] lbl next
+    | Linear.{ next; _ } as inst ->
+        instructions_to_cfg (convert inst :: current) current_lbl next
+    in
+    instructions_to_cfg [] entry instructions;
+    let cfg = {
+      entry;
+      nodes;
+      edges = !edges;
+      adjacency_list = create_adjacency_list nodes !edges;
+    }
+    in
+    cfg
+
+  let dag_of_cfg cfg =
+    let back_edges = get_back_edges cfg in
+    Printf.printf "num back edges %d\n" (List.length back_edges);
+    let back_edges_tbl = Hashtbl.create 10 in
+    List.iter (fun edge -> Hashtbl.add back_edges_tbl edge ()) back_edges;
+    let filtered_edges = List.filter (fun (src, dst, _, _) -> not (Hashtbl.mem back_edges_tbl (src, dst))) cfg.edges in
+    let dag =
+      { cfg with edges = filtered_edges; adjacency_list = create_adjacency_list cfg.nodes filtered_edges}
+    in
+    dag, back_edges
+end
+
+module Structured = struct
+  type structured = { block: block; mutable next: structured }
+  and block = Node of Cfg.Node.t | Block of label * structured | Loop of label * structured | End | Start
+
+  let rec print_block ?(print = false) = function
+  | { block = End } ->
+      Printf.printf "end\n"
+  | { block = Start; next } ->
+      Printf.printf "start\n"; print_block ~print next
+  | { block = Node node; next } ->
+      Printf.printf "%d\n" (Cfg.Node.get_label node);
+      if print then
+        (List.iter (function {desc = Wop(op)} as i->
+          Printmach.operation op i.arg Format.std_formatter i.res;
+          if not (Debuginfo.is_none i.dbg) && !Clflags.locations then
+            Format.fprintf Format.std_formatter " %s" (Debuginfo.to_string i.dbg);
+          Printf.printf "\n";
+        | _ -> ()) (Cfg.Node.get_body node));
+      print_block ~print next
+  | { block = Block (lbl, blocks); next } ->
+      Printf.printf "block %d\n" lbl; print_block ~print blocks;
+      Printf.printf "endblock\n";  print_block ~print next
+  | { block = Loop (lbl, blocks); next } ->
+      Printf.printf "loop %d\n" lbl;
+      print_block ~print blocks;
+      Printf.printf "endloop\n";  print_block ~print next
+end
+
+let rec end_block = Structured.{ block = End; next = end_block }
+
 let cfg_reloop instructions : wasm_instruction list =
-  let rec group current current_lbl acc = function
-    | Linear.{ desc = Lend; _ } -> ((current_lbl, current) :: acc)
-    | { desc = Lbranch lbl; next; _ } -> group [] lbl ((current_lbl, current) :: acc) next
-    | { desc = Lbranch lbl; next; _ } -> group [] lbl ((current_lbl, current) :: acc) next
-    | { desc = Llabel lbl; next; _ } -> group [] lbl ((current_lbl, current) :: acc) next
-    | { next; _ } as inst -> group (inst :: current) current_lbl acc next
+  let open Structured in
+  let cfg = Cfg.cfg_of_instructions instructions in
+  let dag, back_edges = Cfg.dag_of_cfg cfg in
+  let order = ref [] in
+  let visited = Hashtbl.create 10 in
+  let rec visit node =
+    if not (Hashtbl.mem visited node) then begin
+      List.iter visit (Cfg.get_adjacent_nodes dag node);
+      Hashtbl.add visited node ();
+      order := node :: !order
+    end
   in
+  (* Printf.printf "entry: %d\n" cfg.entry; *)
+  (* Printf.printf "edges list\n"; *)
+  (* List.iter (fun (a, b, e) -> Printf.printf "%d - %d (%s)\n" a b (match e.desc with | Wbranch _ -> "br" | Wcondbranch _ -> "condbr" | _ -> assert false)) cfg.edges; *)
+  (* Printf.printf "dag edges list\n"; *)
+  (* List.iter (fun (a, b, e) -> Printf.printf "%d - %d (%s)\n" a b (match e.desc with | Wbranch _ -> "br" | Wcondbranch _ -> "condbr" | _ -> assert false)) dag.edges; *)
+  (* Printf.printf "order list\n"; *)
+  Cfg.iter_nodes dag visit;
+  Printf.printf "a\n";
+  (* List.iter (Printf.printf "%d ") !order; *)
+  (* Printf.printf "\n"; *)
+  let block = { block = Start; next = end_block } in
+  List.fold_left (fun block lbl -> block.next <- { block = Node (Cfg.get_node cfg lbl); next = block.next}; block.next) block !order |> ignore;
+  (* let merged = ref [] in *)
+  ignore print_block;
+  (* Printf.printf "start reloop\n"; *)
+  (* print_block block ~print:true; *)
+  (* Printf.printf "\n"; *)
+  let rec contains lbl = function
+  | { block = Node node } when Cfg.Node.get_label node = lbl -> true
+  | { block = Node _; next } -> contains lbl next
+  | { block = Start; next } -> contains lbl next
+  | { block = End } -> false
+  | { block = Block (_, blocks) | Loop (_, blocks); next } -> contains lbl blocks || contains lbl next
+  in
+  let is_first lbl = function
+  | { block = Node node } when Cfg.Node.get_label node = lbl -> true
+  | { block = Node _ } -> false
+  | { block = Start; next } -> contains lbl next
+  | { block = End } -> false
+  | { block = Block (_, blocks) | Loop (_, blocks) } -> contains lbl blocks
+  in
+  let rec find_pred lbl block =
+    match block.next with
+    | { block = End } -> assert false
+    | { block = Node node } when Cfg.Node.get_label node = lbl ->
+        block
+    | _ -> find_pred lbl block.next
+  in
+  let rec find_innermost_pred src_lbl dst_lbl block =
+    match block.next with
+    | { block = End } -> assert false
+    | { block = Block (_, blocks) | Loop(_, blocks) } when contains src_lbl blocks && contains dst_lbl blocks ->
+        find_innermost_pred src_lbl dst_lbl blocks
+    | { block = b; next } when contains src_lbl ({block = b; next = end_block} )->
+         block
+    | _ -> find_innermost_pred src_lbl dst_lbl block.next
+  in
+  let convert lbl control_flow i =
+    let desc =
+    match control_flow with
+    | \`Branch -> Wbranch lbl
+    | \`Condbranch tst -> Wcondbranch (tst, lbl)
+   in
+   match i with
+   | Some Linear.{ arg; res; dbg; live; } ->
+        { arg; res; dbg; live; desc; }
+   | None -> mk_instr desc
+  in
+  let add_block src_lbl dst_lbl node =
+    let new_lbl = new_label () in
+    let parent_block = find_innermost_pred src_lbl dst_lbl block in
+    let final_block = find_pred dst_lbl parent_block.next in
+    parent_block.next <- { block = Block (new_lbl, { block = Start; next = parent_block.next }); next = final_block.next };
+    final_block.next <- end_block;
+    let instr, control_flow = Cfg.get_edge_instr cfg src_lbl dst_lbl in
+    Cfg.Node.set_body node ((Cfg.Node.get_body node) @ [convert new_lbl control_flow instr])
+  in
+  let add_loop src_lbl dst_lbl node =
+    let new_lbl = new_label () in
+    let parent_block = find_innermost_pred src_lbl dst_lbl block in
+    assert (is_first src_lbl parent_block.next);
+    let final_block = (find_pred dst_lbl parent_block.next).next in
+    parent_block.next <- { block = Loop (new_lbl, { block = Start; next = parent_block.next }); next = final_block.next };
+    final_block.next <- end_block;
+    let instr, control_flow = Cfg.get_edge_instr cfg dst_lbl src_lbl in
+    Cfg.Node.set_body node ((Cfg.Node.get_body node) @ [convert new_lbl control_flow instr])
+  in
+  let rec insert_blocks = function
+  | [] -> ()
+  | src_lbl :: tl ->
+    let edges = Cfg.get_adjacent_nodes cfg src_lbl in
+    let node = Cfg.get_node cfg src_lbl in
+    List.iter (fun dst_lbl ->
+      if (not (List.nth_opt tl 0 = Some dst_lbl)) then begin
+        if List.exists (fun (a, b) -> a = src_lbl && b = dst_lbl) back_edges then
+          add_loop dst_lbl src_lbl node
+        else
+          add_block src_lbl dst_lbl node
+      end
+      ) edges;
+    insert_blocks tl
+  in
+  insert_blocks !order;
+  let rec render_block = function
+  | { block = End } -> []
+  | { block = Start; next } -> render_block next
+  | { block = Node node; next } -> Cfg.Node.get_body node @ render_block next
+  | { block = Block (lbl, blocks); next } ->
+      mk_instr (Wblock lbl) :: render_block blocks @ [mk_instr (Wendblock)] @ render_block next
+  | { block = Loop (lbl, blocks); next } ->
+      mk_instr (Wloop lbl) :: render_block blocks @ [mk_instr (Wendloop)] @ render_block next
+  in
+  render_block block
 
 let lbl_stack = ref []
 
@@ -293,7 +587,7 @@ let push_lbl lbl =
 let pop_lbl () =
   lbl_stack := List.tl !lbl_stack
 
-let get_loop_idx () =
+let _get_loop_idx () =
   List.length !lbl_stack - 1
 
 let get_idx lbl =
@@ -304,13 +598,13 @@ let get_idx lbl =
   in
   let find x lst = func x 0 lst in
   let idx = find lbl !lbl_stack in
-  idx - 1
+  idx
 
 
 let name_for_comparison = function
   | Isigned Ceq -> "i64.eq" | Isigned Cne -> "i64.ne" | Isigned Cle -> "le"
   | Isigned Cge -> "ge" | Isigned Clt -> "lt" | Isigned Cgt -> "i64.gt_s"
-  | Iunsigned Ceq -> "eq" | Iunsigned Cne -> "i64.ne" | Iunsigned Cle -> "ls"
+  | Iunsigned Ceq -> "eq" | Iunsigned Cne -> "i64.ne" | Iunsigned Cle -> "i64.le_u"
   | Iunsigned Cge -> "cs" | Iunsigned Clt -> "cc" | Iunsigned Cgt -> "hi"
 
 let output_epilogue env f =
@@ -368,6 +662,7 @@ let emit_instr env i =
       pop_lbl ();
       `	end_loop\n`
   | Wendblock ->
+      `#end-{emit_label (List.hd !lbl_stack)}\n`;
       pop_lbl ();
       `	end_block\n`
   | Wswitch jumptbl ->
@@ -375,15 +670,12 @@ let emit_instr env i =
       `	i32.wrap_i64\n`;
       `	br_table \{{emit_string (String.concat ", " (Array.to_list (Array.map (fun lbl -> Int.to_string (get_idx lbl)) jumptbl)))}}\n`
   | Wbranch lbl ->
-      let branch_idx = Hashtbl.find blocks_map lbl in
-      (fun () -> `	i64.const {emit_int branch_idx}\n`) |>
-      emit_set_reg loop_idx_reg;
-      let loop_idx = get_loop_idx () in
-      `	br	{emit_int loop_idx}\n`
+      `#br {emit_label lbl}\n`;
+      let branch_idx = get_idx lbl in
+      `	br	{emit_int branch_idx}\n`
   | Wcondbranch(tst, lbl) ->
-      let branch_idx = Hashtbl.find blocks_map lbl in
-      (fun () -> `	i64.const {emit_int branch_idx}\n`) |>
-      emit_set_reg loop_idx_reg;
+      `#condbr {emit_label lbl}\n`;
+      let branch_idx = get_idx lbl in
         begin match tst with
         | Itruetest ->
             assert false
@@ -394,17 +686,13 @@ let emit_instr env i =
             emit_get_reg i.arg.(0);
             emit_get_reg i.arg.(1);
             `	{emit_string comp}\n`;
-            let loop_idx = get_loop_idx () in
-            `#br_if {emit_label lbl}:\n`;
-            `	br_if	{emit_int loop_idx}\n`
+            `	br_if	{emit_int branch_idx}\n`
         | Iinttest_imm(cmp, n) ->
             let comp = name_for_comparison cmp in
             emit_get_reg i.arg.(0);
             `	i64.const	{emit_int n}\n`;
             `	{emit_string comp}\n`;
-            let loop_idx = get_loop_idx () in
-            `#br_if {emit_label lbl}:\n`;
-            `	br_if	{emit_int loop_idx}\n`
+            `	br_if	{emit_int branch_idx}\n`
         | Ifloattest cmp ->
             let _comp =
               match cmp with
@@ -426,17 +714,13 @@ let emit_instr env i =
             `	i64.and\n`;
             `	i64.const 0\n`;
             `	i64.ne\n`;
-            let loop_idx = get_loop_idx () in
-            `#br_if {emit_label lbl}:\n`;
-            `	br_if	{emit_int loop_idx}\n`
+            `	br_if	{emit_int branch_idx}\n`
         | Ieventest ->
             emit_get_reg i.arg.(0);
             `	i64.const 1\n`;
             `	i64.and\n`;
             `	i64.eqz\n`;
-            let loop_idx = get_loop_idx () in
-            `#br_if {emit_label lbl}:\n`;
-            `	br_if	{emit_int loop_idx}\n`
+            `	br_if	{emit_int branch_idx}\n`
         end
   | Wunreachable ->
       `	unreachable\n`
@@ -769,7 +1053,7 @@ let emit_args args =
 (*   | {desc = Lend} -> () | i -> emit_instr env i; emit_all env i.next *)
 
 let emit_all env instrs =
-  let instrs = reloop instrs in
+  let instrs = match true with | true -> cfg_reloop instrs | false -> reloop instrs in
   List.iter (emit_instr env) instrs
 
 module RegOrder =
@@ -862,6 +1146,7 @@ let fundecl fundecl =
   fake_address_labels := [];
   emit_named_text_section fundecl.fun_name;
   let { fun_name; _ } = fundecl in
+  Printf.printf "%s\n" fun_name;
   let fun_name = match is_magic_function fun_name with
     | true -> fun_name
     | false -> fun_name ^ "_raw"
