@@ -375,7 +375,7 @@ end = struct
       | Lcondbranch3(_, _, _) -> assert false
       | Lswitch jumptbl -> Wswitch jumptbl
       | Lraise k -> Wraise k
-      | Lentertrap
+      | Lentertrap -> Wentertrap
       | Ladjust_trap_depth _
       | Lpushtrap _
       | Lpoptrap -> assert false
@@ -403,6 +403,16 @@ end = struct
         instructions_to_cfg [] new_lbl next
     | { desc = Lswitch _; next } ->
         assert false
+    | { desc = Lpushtrap _; next } ->
+        let lbl = new_label () in
+        add_cfg current_lbl current;
+        edges := (current_lbl, lbl, None, \`Branch) :: !edges;
+        instructions_to_cfg [] lbl next
+    | { desc = Lpoptrap; next } ->
+        let lbl = new_label () in
+        add_cfg current_lbl current;
+        edges := (current_lbl, lbl, None, \`Branch) :: !edges;
+        instructions_to_cfg [] lbl next
     | { desc = Llabel lbl; next } ->
         add_cfg current_lbl current;
         edges := (current_lbl, lbl, None, \`Branch) :: !edges;
@@ -482,7 +492,6 @@ let cfg_reloop instructions : wasm_instruction list =
   (* List.iter (fun (a, b, e) -> Printf.printf "%d - %d (%s)\n" a b (match e.desc with | Wbranch _ -> "br" | Wcondbranch _ -> "condbr" | _ -> assert false)) dag.edges; *)
   (* Printf.printf "order list\n"; *)
   Cfg.iter_nodes dag visit;
-  Printf.printf "a\n";
   (* List.iter (Printf.printf "%d ") !order; *)
   (* Printf.printf "\n"; *)
   let block = { block = Start; next = end_block } in
