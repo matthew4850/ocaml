@@ -201,6 +201,7 @@ type codegen_option =
 type fundecl =
   { fun_name: string;
     fun_args: (Backend_var.With_provenance.t * machtype) list;
+    fun_uses_env: bool;
     fun_body: expression;
     fun_codegen_options : codegen_option list;
     fun_poll: Lambda.poll_attribute;

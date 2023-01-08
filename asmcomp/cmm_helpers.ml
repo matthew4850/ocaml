@@ -444,20 +444,23 @@ let rec div_int c1 c2 is_safe dbg =
           (div_int c1 (Cconst_int (-n, dbg)) is_safe dbg)
           dbg
       else begin
-        let (m, p) = divimm_parameters (Nativeint.of_int n) in
-        (* Algorithm:
-              t = multiply-high-signed(c1, m)
-              if m < 0, t = t + c1
-              if p > 0, t = shift-right-signed(t, p)
-              res = t + sign-bit(c1)
-        *)
-        bind "dividend" c1 (fun c1 ->
-          let t = Cop(Cmulhi, [c1; natint_const_untagged dbg m], dbg) in
-          let t = if m < 0n then Cop(Caddi, [t; c1], dbg) else t in
-          let t =
-            if p > 0 then Cop(Casr, [t; Cconst_int (p, dbg)], dbg) else t
-          in
-          add_int t (lsr_int c1 (Cconst_int (Nativeint.size - 1, dbg)) dbg) dbg)
+        match Config.architecture with
+        | "wasm32" -> Cop(Cdivi, [c1; c2], dbg)
+        | _ ->
+          let (m, p) = divimm_parameters (Nativeint.of_int n) in
+          (* Algorithm:
+                t = multiply-high-signed(c1, m)
+                if m < 0, t = t + c1
+                if p > 0, t = shift-right-signed(t, p)
+                res = t + sign-bit(c1)
+          *)
+          bind "dividend" c1 (fun c1 ->
+            let t = Cop(Cmulhi, [c1; natint_const_untagged dbg m], dbg) in
+            let t = if m < 0n then Cop(Caddi, [t; c1], dbg) else t in
+            let t =
+              if p > 0 then Cop(Casr, [t; Cconst_int (p, dbg)], dbg) else t
+            in
+            add_int t (lsr_int c1 (Cconst_int (Nativeint.size - 1, dbg)) dbg) dbg)
       end
   | (c1, c2) when !Clflags.unsafe || is_safe = Lambda.Unsafe ->
       Cop(Cdivi, [c1; c2], dbg)
@@ -1875,6 +1878,7 @@ let send_function arity =
   Cfunction
    {fun_name;
     fun_args = List.map (fun (arg, ty) -> VP.create arg, ty) fun_args;
+    fun_uses_env = false;
     fun_body = body;
     fun_codegen_options = [];
     fun_poll = Default_poll;
@@ -1889,6 +1893,7 @@ let apply_function arity =
   Cfunction
    {fun_name;
     fun_args = List.map (fun arg -> (VP.create arg, typ_val)) all_args;
+    fun_uses_env = true;
     fun_body = body;
     fun_codegen_options = [];
     fun_poll = Default_poll;
@@ -1914,6 +1919,7 @@ let tuplify_function arity =
   Cfunction
    {fun_name;
     fun_args = [VP.create arg, typ_val; VP.create clos, typ_val];
+    fun_uses_env = false;
     fun_body =
       Cop(Capply typ_val,
           get_field_gen Asttypes.Mutable (Cvar clos) 2 (dbg ())
@@ -1988,6 +1994,7 @@ let final_curry_function arity =
   Cfunction
    {fun_name;
     fun_args = [VP.create last_arg, typ_val; VP.create last_clos, typ_val];
+    fun_uses_env = true;
     fun_body = curry_fun [] last_clos (arity-1);
     fun_codegen_options = [];
     fun_poll = Default_poll;
@@ -2006,6 +2013,7 @@ let rec intermediate_curry_functions arity num =
     Cfunction
      {fun_name = name2;
       fun_args = [VP.create arg, typ_val; VP.create clos, typ_val];
+      fun_uses_env = true;
       fun_body =
          if arity - num > 2 && arity <= max_arity_optimized then
            Cop(Calloc,
@@ -2062,6 +2070,7 @@ let rec intermediate_curry_functions arity num =
             Cfunction
               {fun_name;
                fun_args;
+               fun_uses_env = true;
                fun_body = iter (num+1)
                   (List.map (fun (arg,_) -> Cvar arg) direct_args) clos;
                fun_codegen_options = [];
@@ -2600,6 +2609,7 @@ let entry_point namelist =
   let fun_dbg = placeholder_fun_dbg ~human_name:fun_name in
   Cfunction {fun_name;
              fun_args = [];
+             fun_uses_env = false;
              fun_body = body;
              fun_codegen_options = [Reduce_code_size];
              fun_poll = Default_poll;

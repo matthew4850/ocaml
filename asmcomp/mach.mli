@@ -86,6 +86,7 @@ and instruction_desc =
 type fundecl =
   { fun_name: string;
     fun_args: Reg.t array;
+    fun_uses_env: bool;
     fun_body: instruction;
     fun_codegen_options : Cmm.codegen_option list;
     fun_dbg : Debuginfo.t;

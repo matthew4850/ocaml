@@ -85,7 +85,7 @@ let emit_get_reg env reg =
       `	global.get    __stack_pointer\n`;
       `	i64.const    {emit_int ofs}\n`;
       `	i64.add\n`;
-      `	i64.load    0\n`
+      `	{emit_string (get_type reg.typ)}.load    0\n`
   | { loc = Unknown } -> assert false
 
 let emit_set_reg env reg emit_val =
@@ -102,7 +102,7 @@ let emit_set_reg env reg emit_val =
       `	i64.const    {emit_int ofs}\n`;
       `	i64.add\n`;
       emit_val ();
-      `	i64.store    0\n`
+      `	{emit_string (get_type reg.typ)}.store    0\n`
   | { loc = Unknown } -> assert false
 
 let emit_load env src dst =
@@ -117,7 +117,7 @@ let emit_store env ?(ofs = 0) src dst=
   `	i64.add\n`;
   emit_conversion dst.typ Addr;
   emit_get_reg env src;
-  `	i64.store    0\n`
+  `	{emit_string (get_type src.typ)}.store    0\n`
 
 let emit_symbol s =
   emit_symbol '$' s
@@ -149,14 +149,17 @@ let name_for_int_operation = function
   | Iadd -> "add"
   | Isub -> "sub"
   | Imul -> "mul"
-  | Idiv -> assert false
+  | Imulh -> assert false
+  | Imod -> "rem_s"
+  | Idiv -> "div_s"
   | Iand -> "and"
   | Ior  -> "or"
   | Ixor -> "xor"
   | Ilsl -> "shl"
   | Ilsr -> "shr_u"
   | Iasr -> "shr_s"
-  | _ -> assert false
+  | Icomp _ -> assert false
+  | Icheckbound -> ""
 
 let fake_address_labels = ref []
 
@@ -181,7 +184,8 @@ let record_frame_label env live dbg =
 let record_frame env live dbg =
   let lbl = record_frame_label env live dbg in
   fake_address_labels := lbl :: !fake_address_labels;
-  `{emit_label lbl}_fake:\n`
+  `{emit_label lbl}_fake:\n`;
+  lbl
 
 (* type cfg = *)
 (*   { label: string; *)
@@ -210,7 +214,11 @@ and wasm_control_flow =
   | Wcondbranch3 of label option * label option * label option
   | Wswitch of label array
   | Wraise of Lambda.raise_kind
+  | Wadjust_trap_depth of int
+  | Wpoptrap
   | Wunreachable
+  | Wtry
+  | Wcatch of label
 
 let mk_instr ?(arg = [||]) desc =
   { desc = desc;
@@ -272,6 +280,7 @@ let reloop instructions : wasm_instruction list =
   mk_instr (Wloop (-2)) :: blocks @ mk_instr (Wblock switch_block)
     :: (mk_instr ~arg:([|loop_idx_reg|]) (Wswitch labels)) :: (mk_instr Wendblock) :: a @ [mk_instr Wendloop; mk_instr Wunreachable]
 
+[@@@warning "-69"]
 module LblSet = Stdlib.Set.Make(Int)
 module Cfg : sig
   module Node :
@@ -282,10 +291,11 @@ module Cfg : sig
       val set_body : t -> wasm_instruction list -> unit
     end
   type t
-  type control_flow = [\`Branch | \`Condbranch of test ]
+  type control_flow = [\`Branch | \`Condbranch of test | \`Fake]
   val cfg_of_instructions : Linear.instruction -> t
   val dag_of_cfg : t -> t * (label * label) list
   val get_adjacent_nodes : t -> label -> label list
+  val get_adjacent_try_catch_edges : t -> label -> (label * label) list
   val iter_nodes : t -> (label -> unit) -> unit
   val get_node : t -> label -> Node.t
   val get_edge_instr : t -> label -> label -> instruction option * control_flow
@@ -307,12 +317,13 @@ end = struct
     let set_body t body = t.body <- body
   end
 
-  type control_flow = [\`Branch | \`Condbranch of test]
+  type control_flow = [\`Branch | \`Condbranch of test | \`Fake ]
 
   type t = {
     entry: label;
     nodes: (label, Node.t) Hashtbl.t;
     edges: (label * label * instruction option * control_flow) list;
+    try_edges: (label * label * label) list;
     adjacency_list: (label, label list) Hashtbl.t
   }
 
@@ -325,6 +336,9 @@ end = struct
 
   let get_adjacent_nodes t lbl =
     Hashtbl.find t.adjacency_list lbl
+
+  let get_adjacent_try_catch_edges t lbl =
+    List.filter_map (fun (src, dst, lbl_handler) -> if src = lbl then Some(dst,lbl_handler) else None) t.try_edges
 
   let iter_nodes t f =
     Hashtbl.iter (fun label _ -> f label) t.nodes
@@ -356,11 +370,14 @@ end = struct
       | true ->
           back_edges := (src, dst) :: !back_edges;
           visited
-      | false -> LblSet.add src visited
+      | false ->
+          begin if src = dst then
+            back_edges := (src, dst) :: !back_edges
+          end;
+          LblSet.add src visited
     in
     dfs cfg f LblSet.empty;
     !back_edges
-
   let cfg_of_instructions instructions =
     let convert { desc; next; arg; res; dbg; live } =
       let convert = function
@@ -373,10 +390,10 @@ end = struct
       | Lbranch _ -> assert false
       | Lcondbranch(_, _) -> assert false
       | Lcondbranch3(_, _, _) -> assert false
-      | Lswitch jumptbl -> Wswitch jumptbl
+      | Lswitch jumptbl -> assert false
       | Lraise k -> Wraise k
-      | Lentertrap -> Wentertrap
-      | Ladjust_trap_depth _
+      | Lentertrap -> assert false
+      | Ladjust_trap_depth { delta_traps } -> Wadjust_trap_depth delta_traps
       | Lpushtrap _
       | Lpoptrap -> assert false
       in
@@ -389,6 +406,9 @@ end = struct
       Hashtbl.add nodes lbl (Node.make lbl (List.rev instructions))
     in
     let edges = ref [] in
+    let try_edges = ref [] in
+    let trap_start = ref [] in
+    (* let trap_end = ref [] in *)
     let rec instructions_to_cfg current current_lbl = function
     | Linear.{ desc = Lend } -> add_cfg current_lbl current
     | { desc = Lbranch lbl; next } as i ->
@@ -401,15 +421,67 @@ end = struct
         add_cfg current_lbl current;
         edges := (current_lbl, new_lbl, None, \`Branch) :: (current_lbl, lbl, Some i, \`Condbranch tst) :: !edges;
         instructions_to_cfg [] new_lbl next
-    | { desc = Lswitch _; next } ->
-        assert false
-    | { desc = Lpushtrap _; next } ->
+    | { desc = Lcondbranch3 (lbl0, lbl1, lbl2); next } as i ->
+        add_cfg current_lbl current;
+        let previous_lbl = ref current_lbl in
+        begin match lbl0 with
+        | None -> ()
+        | Some lbl ->
+          let new_lbl = new_label () in
+          add_cfg new_lbl [];
+          edges := (!previous_lbl, new_lbl, None, \`Branch) :: (!previous_lbl, lbl, Some i, \`Condbranch (Iinttest_imm (Iunsigned Clt, 1))) :: !edges;
+          previous_lbl := new_lbl
+        end;
+        begin match lbl1 with
+        | None -> ()
+        | Some lbl ->
+          let new_lbl = new_label () in
+          add_cfg new_lbl [];
+          edges := (!previous_lbl, new_lbl, None, \`Branch) :: (!previous_lbl, lbl, Some i, \`Condbranch (Iinttest_imm (Iunsigned Ceq, 1))) :: !edges;
+          previous_lbl := new_lbl
+        end;
+        begin match lbl2 with
+        | None -> ()
+        | Some lbl ->
+          let new_lbl = new_label () in
+          add_cfg new_lbl [];
+          edges := (!previous_lbl, new_lbl, None, \`Branch) :: (!previous_lbl, lbl, Some i, \`Condbranch (Iinttest_imm (Iunsigned Cgt, 1))) :: !edges;
+          previous_lbl := new_lbl
+        end;
+        let new_lbl = new_label () in
+        edges := (!previous_lbl, new_lbl, None, \`Branch) :: !edges;
+        instructions_to_cfg [] new_lbl next
+    | { desc = Lswitch jumptbl; next } as i ->
+        let previous_lbl = ref current_lbl in
+        add_cfg current_lbl current;
+        for j = 0 to Array.length jumptbl - 2 do
+          let new_lbl = new_label () in
+          add_cfg new_lbl [];
+          edges := (!previous_lbl, new_lbl, None, \`Branch) :: (!previous_lbl, jumptbl.(j), Some i, \`Condbranch (Iinttest_imm (Iunsigned Ceq, j))) :: !edges;
+          previous_lbl := new_lbl
+        done;
+        let new_lbl = new_label () in
+        edges := (!previous_lbl, new_lbl, None, \`Branch) :: (!previous_lbl, (jumptbl.(Array.length jumptbl - 1)), Some i, \`Branch) :: !edges;
+        instructions_to_cfg [] new_lbl next;
+    | { desc = Lpushtrap { lbl_handler }; next } ->
         let lbl = new_label () in
         add_cfg current_lbl current;
         edges := (current_lbl, lbl, None, \`Branch) :: !edges;
+        trap_start := (lbl, lbl_handler) :: !trap_start;
         instructions_to_cfg [] lbl next
     | { desc = Lpoptrap; next } ->
-        let lbl = new_label () in
+        instructions_to_cfg (mk_instr (Wpoptrap) :: current) current_lbl next
+    (* | { desc = Ladjust_trap_depth { delta_traps }; next } -> *)
+    (*     assert (delta_traps = 1 || delta_traps = -1); *)
+    (*     instructions_to_cfg current current_lbl next *)
+    | { desc = Llabel lbl; next = { desc = Lentertrap; next } } ->
+        (* trap_end := current_lbl :: !trap_end; *)
+        begin match !trap_start with
+        | (a, b) :: tl ->
+            trap_start := tl;
+            try_edges := (a, current_lbl, b) :: !try_edges
+        | _ -> assert false
+        end;
         add_cfg current_lbl current;
         edges := (current_lbl, lbl, None, \`Branch) :: !edges;
         instructions_to_cfg [] lbl next
@@ -417,22 +489,30 @@ end = struct
         add_cfg current_lbl current;
         edges := (current_lbl, lbl, None, \`Branch) :: !edges;
         instructions_to_cfg [] lbl next
-    | Linear.{ next; _ } as inst ->
+    | Linear.{ next } as inst ->
         instructions_to_cfg (convert inst :: current) current_lbl next
     in
     instructions_to_cfg [] entry instructions;
+    assert (List.length !trap_start = 0);
+    (* assert (0 = List.compare_lengths !trap_start !trap_end); *)
+    (* let trap_start = !trap_start in *)
+    (* let trap_end = List.rev (!trap_end) in *)
+    (* let try_edges = List.map2 (fun (a, b) c -> (a, c, b)) trap_start trap_end in *)
+    let try_edges = !try_edges in
+    let edges = (List.map (fun (_, dst, lbl_handler) -> (dst, lbl_handler, None, \`Fake)) try_edges) @ !edges in
     let cfg = {
       entry;
       nodes;
-      edges = !edges;
-      adjacency_list = create_adjacency_list nodes !edges;
+      edges;
+      try_edges;
+      adjacency_list = create_adjacency_list nodes edges;
     }
     in
     cfg
 
   let dag_of_cfg cfg =
     let back_edges = get_back_edges cfg in
-    Printf.printf "num back edges %d\n" (List.length back_edges);
+    (* Printf.printf "num back edges %d\n" (List.length back_edges); *)
     let back_edges_tbl = Hashtbl.create 10 in
     List.iter (fun edge -> Hashtbl.add back_edges_tbl edge ()) back_edges;
     let filtered_edges = List.filter (fun (src, dst, _, _) -> not (Hashtbl.mem back_edges_tbl (src, dst))) cfg.edges in
@@ -444,7 +524,13 @@ end
 
 module Structured = struct
   type structured = { block: block; mutable next: structured }
-  and block = Node of Cfg.Node.t | Block of label * structured | Loop of label * structured | End | Start
+  and block =
+    | Node of Cfg.Node.t
+    | Block of label * structured
+    | Loop of label * structured
+    | TryCatch of label * structured
+    | End
+    | Start
 
   let rec print_block ?(print = false) = function
   | { block = End } ->
@@ -463,11 +549,18 @@ module Structured = struct
       print_block ~print next
   | { block = Block (lbl, blocks); next } ->
       Printf.printf "block %d\n" lbl; print_block ~print blocks;
-      Printf.printf "endblock\n";  print_block ~print next
+      Printf.printf "endblock\n";
+      print_block ~print next
   | { block = Loop (lbl, blocks); next } ->
       Printf.printf "loop %d\n" lbl;
       print_block ~print blocks;
-      Printf.printf "endloop\n";  print_block ~print next
+      Printf.printf "endloop\n";
+      print_block ~print next
+  | { block = TryCatch (lbl, blocks); next } ->
+      Printf.printf "try\n";
+      print_block ~print blocks;
+      Printf.printf "catch %d\n" lbl;
+      print_block ~print next;
 end
 
 let rec end_block = Structured.{ block = End; next = end_block }
@@ -487,9 +580,9 @@ let cfg_reloop instructions : wasm_instruction list =
   in
   (* Printf.printf "entry: %d\n" cfg.entry; *)
   (* Printf.printf "edges list\n"; *)
-  (* List.iter (fun (a, b, e) -> Printf.printf "%d - %d (%s)\n" a b (match e.desc with | Wbranch _ -> "br" | Wcondbranch _ -> "condbr" | _ -> assert false)) cfg.edges; *)
+  (* List.iter (fun (a, b, _, e) -> Printf.printf "%d - %d (%s)\n" a b (match e with | \`Branch -> "br" | \`Condbranch _ -> "condbr" | _ -> assert false)) cfg.edges; *)
   (* Printf.printf "dag edges list\n"; *)
-  (* List.iter (fun (a, b, e) -> Printf.printf "%d - %d (%s)\n" a b (match e.desc with | Wbranch _ -> "br" | Wcondbranch _ -> "condbr" | _ -> assert false)) dag.edges; *)
+  (* List.iter (fun (a, b, _, e) -> Printf.printf "%d - %d (%s)\n" a b (match e with | \`Branch -> "br" | \`Condbranch _ -> "condbr" | _ -> assert false)) dag.edges; *)
   (* Printf.printf "order list\n"; *)
   Cfg.iter_nodes dag visit;
   (* List.iter (Printf.printf "%d ") !order; *)
@@ -506,14 +599,14 @@ let cfg_reloop instructions : wasm_instruction list =
   | { block = Node _; next } -> contains lbl next
   | { block = Start; next } -> contains lbl next
   | { block = End } -> false
-  | { block = Block (_, blocks) | Loop (_, blocks); next } -> contains lbl blocks || contains lbl next
+  | { block = Block (_, blocks) | Loop (_, blocks) | TryCatch (_, blocks); next } -> contains lbl blocks || contains lbl next
   in
   let is_first lbl = function
   | { block = Node node } when Cfg.Node.get_label node = lbl -> true
   | { block = Node _ } -> false
   | { block = Start; next } -> contains lbl next
   | { block = End } -> false
-  | { block = Block (_, blocks) | Loop (_, blocks) } -> contains lbl blocks
+  | { block = Block (_, blocks) | Loop (_, blocks) | TryCatch (_, blocks) } -> contains lbl blocks
   in
   let rec find_pred lbl block =
     match block.next with
@@ -525,58 +618,80 @@ let cfg_reloop instructions : wasm_instruction list =
   let rec find_innermost_pred src_lbl dst_lbl block =
     match block.next with
     | { block = End } -> assert false
-    | { block = Block (_, blocks) | Loop(_, blocks) } when contains src_lbl blocks && contains dst_lbl blocks ->
+    | { block = Block (_, blocks) | Loop(_, blocks) | TryCatch (_, blocks) } when contains src_lbl blocks && contains dst_lbl blocks ->
         find_innermost_pred src_lbl dst_lbl blocks
     | { block = b; next } when contains src_lbl ({block = b; next = end_block} )->
          block
     | _ -> find_innermost_pred src_lbl dst_lbl block.next
   in
-  let convert lbl control_flow i =
+  let add_control_flow_body lbl control_flow i node =
     let desc =
     match control_flow with
     | \`Branch -> Wbranch lbl
     | \`Condbranch tst -> Wcondbranch (tst, lbl)
    in
-   match i with
+   let body = Cfg.Node.get_body node in
+   let body = body @ [ match i with
    | Some Linear.{ arg; res; dbg; live; } ->
         { arg; res; dbg; live; desc; }
-   | None -> mk_instr desc
+   | None -> mk_instr desc ] in
+   Cfg.Node.set_body node body
   in
-  let add_block src_lbl dst_lbl node =
-    let new_lbl = new_label () in
+  let add_block src_lbl dst_lbl =
+    let instr, control_flow = Cfg.get_edge_instr cfg src_lbl dst_lbl in
+    let new_lbl = match control_flow with
+      | \`Fake -> dst_lbl
+      | _ -> new_label () in
     let parent_block = find_innermost_pred src_lbl dst_lbl block in
-    let final_block = find_pred dst_lbl parent_block.next in
+    let final_block = find_pred dst_lbl parent_block in
     parent_block.next <- { block = Block (new_lbl, { block = Start; next = parent_block.next }); next = final_block.next };
     final_block.next <- end_block;
-    let instr, control_flow = Cfg.get_edge_instr cfg src_lbl dst_lbl in
-    Cfg.Node.set_body node ((Cfg.Node.get_body node) @ [convert new_lbl control_flow instr])
+    let node = Cfg.get_node cfg src_lbl in
+    match control_flow with
+    | \`Fake -> ()
+    | (\`Branch | \`Condbranch _)  as control_flow ->
+        add_control_flow_body new_lbl control_flow instr node
   in
-  let add_loop src_lbl dst_lbl node =
+  let add_loop src_lbl dst_lbl =
     let new_lbl = new_label () in
     let parent_block = find_innermost_pred src_lbl dst_lbl block in
     assert (is_first src_lbl parent_block.next);
-    let final_block = (find_pred dst_lbl parent_block.next).next in
+    let final_block = (find_pred dst_lbl parent_block).next in
     parent_block.next <- { block = Loop (new_lbl, { block = Start; next = parent_block.next }); next = final_block.next };
     final_block.next <- end_block;
     let instr, control_flow = Cfg.get_edge_instr cfg dst_lbl src_lbl in
-    Cfg.Node.set_body node ((Cfg.Node.get_body node) @ [convert new_lbl control_flow instr])
+    let node = Cfg.get_node cfg dst_lbl in
+    match control_flow with
+    | \`Fake -> assert false
+    | (\`Branch | \`Condbranch _)  as control_flow ->
+        add_control_flow_body new_lbl control_flow instr node
   in
   let rec insert_blocks = function
   | [] -> ()
   | src_lbl :: tl ->
-    let edges = Cfg.get_adjacent_nodes cfg src_lbl in
-    let node = Cfg.get_node cfg src_lbl in
+    let try_catch_edges = Cfg.get_adjacent_try_catch_edges cfg src_lbl in
+    List.iter (fun (dst_lbl, lbl_handler) ->
+      let parent_block = find_innermost_pred src_lbl dst_lbl block in
+      assert (is_first src_lbl parent_block.next);
+      let final_block = (find_pred dst_lbl parent_block).next in
+      parent_block.next <- { block = TryCatch (lbl_handler, { block = Start; next = parent_block.next }); next = final_block.next };
+      final_block.next <- end_block
+    ) try_catch_edges;
+
     List.iter (fun dst_lbl ->
-      if (not (List.nth_opt tl 0 = Some dst_lbl)) then begin
-        if List.exists (fun (a, b) -> a = src_lbl && b = dst_lbl) back_edges then
-          add_loop dst_lbl src_lbl node
-        else
-          add_block src_lbl dst_lbl node
+      add_loop src_lbl dst_lbl
+    ) (List.filter_map (fun (src, dst) -> if dst = src_lbl then Some src else None) back_edges);
+    let edges = Cfg.get_adjacent_nodes dag src_lbl in
+    List.iter (fun dst_lbl ->
+     let _, control_flow = Cfg.get_edge_instr cfg src_lbl dst_lbl in
+      if (not (List.nth_opt tl 0 = Some dst_lbl) || control_flow = \`Fake) then begin
+        add_block src_lbl dst_lbl
       end
       ) edges;
     insert_blocks tl
   in
   insert_blocks !order;
+  (* print_block block; *)
   let rec render_block = function
   | { block = End } -> []
   | { block = Start; next } -> render_block next
@@ -585,6 +700,8 @@ let cfg_reloop instructions : wasm_instruction list =
       mk_instr (Wblock lbl) :: render_block blocks @ [mk_instr (Wendblock)] @ render_block next
   | { block = Loop (lbl, blocks); next } ->
       mk_instr (Wloop lbl) :: render_block blocks @ [mk_instr (Wendloop)] @ render_block next
+  | { block = TryCatch (lbl, blocks); next } ->
+      (mk_instr Wtry) :: render_block blocks @ [mk_instr (Wcatch lbl)] @ render_block next
   in
   render_block block
 
@@ -611,10 +728,10 @@ let get_idx lbl =
 
 
 let name_for_comparison = function
-  | Isigned Ceq -> "i64.eq" | Isigned Cne -> "i64.ne" | Isigned Cle -> "le"
-  | Isigned Cge -> "ge" | Isigned Clt -> "lt" | Isigned Cgt -> "i64.gt_s"
-  | Iunsigned Ceq -> "eq" | Iunsigned Cne -> "i64.ne" | Iunsigned Cle -> "i64.le_u"
-  | Iunsigned Cge -> "cs" | Iunsigned Clt -> "cc" | Iunsigned Cgt -> "hi"
+  | Isigned Ceq -> "i64.eq" | Isigned Cne -> "i64.ne" | Isigned Cle -> "i64.le_s"
+  | Isigned Cge -> "i64.ge_s" | Isigned Clt -> "i64.lt_s" | Isigned Cgt -> "i64.gt_s"
+  | Iunsigned Ceq -> "i64.eq" | Iunsigned Cne -> "i64.ne" | Iunsigned Cle -> "i64.le_u"
+  | Iunsigned Cge -> "i64.ge_u" | Iunsigned Clt -> "i64.lt_u" | Iunsigned Cgt -> "i64.gt_u"
 
 let output_epilogue env f =
   if env.f.fun_frame_required then begin
@@ -638,6 +755,126 @@ let emit_named_text_section func_name =
 
 let is_magic_function =
   String.starts_with ~prefix:"caml_"
+
+let function_entry env i =
+  let lbl = record_frame env i.live (Dbg_other i.dbg) in
+  `	global.get	__stack_pointer\n`;
+  `	i64.const	8\n`;
+  `	i64.sub\n`;
+  `	global.set	__stack_pointer\n`;
+  `	global.get	__stack_pointer\n`;
+  `	i64.const {emit_label lbl}\n`;
+  `	i64.store 0\n`
+
+let function_cleanup env i =
+  `	global.get	__stack_pointer\n`;
+  `	i64.const	8\n`;
+  `	i64.add\n`;
+  `	global.set	__stack_pointer\n`;
+  begin match Array.length i.res with
+  | 1 ->
+    (fun () -> ()) |>
+    emit_set_reg env i.res.(0)
+  | 0 ->
+    `	drop\n`
+  | _ -> assert false end
+
+let emit_direct_call func ~tailcall =
+  let emit_call = match tailcall with
+  | false -> emit_jump "call"
+  | true -> emit_jump "return_call" in
+  let func = match is_magic_function func with
+    | true -> func
+    | false -> func ^ "_raw"
+  in
+  `	{emit_call func}\n`
+
+let emit_indirect_call i ~tailcall =
+  let emit_args args =
+    emit_string
+      (String.concat ", "
+        (List.map (fun r -> get_type r.typ) (Array.to_list args |> List.tl)))
+  in
+  let call = match tailcall with
+  | false -> "call_indirect"
+  | true -> "return_call_indirect"
+  in
+  `	{emit_string call} ({emit_args i.arg}) -> (i64)\n`
+
+let emit_direct_call_args env i =
+  for j = 0 to Array.length i.arg - 1 do
+    emit_get_reg env i.arg.(j);
+  done
+
+let emit_indirect_call_args env i =
+  for j = 1 to Array.length i.arg - 1 do
+    emit_get_reg env i.arg.(j);
+  done;
+  emit_get_reg env i.arg.(0);
+  `	i32.wrap_i64\n`
+
+type wasm_typ = I32 | I64 | F32 | F64
+
+let emit_wasm_typ = function
+  | I32 ->`i32`
+  | I64 ->`i64`
+  | F32 ->`f32`
+  | F64 ->`f64`
+
+let rec emit_wasm_types = function
+  | [] -> ()
+  | [typ] ->
+    emit_wasm_typ typ
+  | typ :: tl ->
+    emit_wasm_typ typ;
+    emit_string ", ";
+    emit_wasm_types tl
+
+let ext_func_type_overrides =
+  Hashtbl.of_seq (List.to_seq
+  [
+    "caml_modify", ([I64; I64], []);
+    "caml_initialize", ([I64; I64], []);
+    "caml_alloc", ([I64; I32], [I64]);
+    "caml_tettsttttt", ([I64; I64], [F32]);
+    "caml_int32_bits_of_float_unboxed", ([F64], [I32]);
+    "caml_int32_to_float_unboxed", ([I32], [F64]);
+    "caml_int32_of_float_unboxed", ([F64], [I32]);
+    "caml_gc_minor_words_unboxed", ([], [F64]);
+  ])
+
+let get_ext_func_type_override func =
+  Hashtbl.find_opt ext_func_type_overrides func
+
+let emit_ext_call env i func =
+  add_used_symbol func;
+  let override = get_ext_func_type_override func in
+  begin match override with
+  | Some([], _) -> ()
+  | Some(args, _) ->
+    for j = 0 to Array.length i.arg - 1 do
+      emit_get_reg env i.arg.(j);
+      match i.arg.(j), List.nth args j with
+      | {typ=Int|Val|Addr}, I32 ->
+         `	i32.wrap_i64\n`;
+      | _ -> ()
+    done
+  | None ->
+      emit_direct_call_args env i
+  end;
+  `	{emit_call func}\n`;
+  match Array.length i.res, override with
+  | 1, Some(_, [I32]) ->
+     `	i64.extend_i32_s\n`;
+    (fun () -> ()) |>
+    emit_set_reg env i.res.(0)
+  | 1, _ ->
+    (fun () -> ()) |>
+    emit_set_reg env i.res.(0)
+  | 0, Some(_, []) -> ()
+  | 0, _ ->
+    `	drop\n`;
+  | _ -> assert false
 
 let emit_instr env i =
   let emit_get_reg = emit_get_reg env in
@@ -674,6 +911,45 @@ let emit_instr env i =
       `#end-{emit_label (List.hd !lbl_stack)}\n`;
       pop_lbl ();
       `	end_block\n`
+  | Wtry ->
+      push_lbl (new_label ());
+      `	global.get __stack_pointer\n`;
+      `	i64.const 16\n`;
+      `	i64.sub\n`;
+      `	global.set __stack_pointer\n`;
+      `	global.get __stack_pointer\n`;
+      get_domain_field Domainstate.Domain_exception_pointer;
+      `	i64.store 0\n`;
+      (fun () ->
+      `	global.get __stack_pointer\n`;
+      ) |>
+      set_domain_field Domainstate.Domain_exception_pointer;
+      env.stack_offset <- env.stack_offset + 16;
+      `	try\n`
+  | Wcatch handler_lbl ->
+      pop_lbl ();
+      `	catch __ocaml_exception\n`;
+      (fun () -> ()) |>
+      emit_set_reg (phys_reg 0);
+      let branch_idx = 1 + get_idx handler_lbl in
+      `	br	{emit_int branch_idx}\n`;
+      `	end_try\n`
+  | Wpoptrap ->
+      env.stack_offset <- env.stack_offset - 16;
+      (fun () ->
+      `	global.get __stack_pointer\n`;
+      `	i64.load 0\n`;
+      ) |>
+      set_domain_field Domainstate.Domain_exception_pointer;
+      `	global.get __stack_pointer\n`;
+      `	i64.const 16\n`;
+      `	i64.add\n`;
+      `	global.set __stack_pointer\n`;
+  | Wadjust_trap_depth delta_traps ->
+      (* each trap occupies 16 bytes on the stack *)
+      assert (delta_traps = 1 || delta_traps = -1);
+      let delta = 16 * delta_traps in
+      env.stack_offset <- env.stack_offset + delta
   | Wswitch jumptbl ->
       emit_get_reg i.arg.(0);
       `	i32.wrap_i64\n`;
@@ -687,9 +963,14 @@ let emit_instr env i =
       let branch_idx = get_idx lbl in
         begin match tst with
         | Itruetest ->
-            assert false
+            emit_get_reg i.arg.(0);
+            `	i64.eqz\n`;
+            `	i32.eqz\n`;
+            `	br_if	{emit_int branch_idx}\n`
         | Ifalsetest ->
-            assert false
+            emit_get_reg i.arg.(0);
+            `	i64.eqz\n`;
+            `	br_if	{emit_int branch_idx}\n`
         | Iinttest cmp ->
             let comp = name_for_comparison cmp in
             emit_get_reg i.arg.(0);
@@ -703,20 +984,35 @@ let emit_instr env i =
             `	{emit_string comp}\n`;
             `	br_if	{emit_int branch_idx}\n`
         | Ifloattest cmp ->
-            let _comp =
-              match cmp with
-              | CFeq -> "eq"
-              | CFneq -> "ne"
-              | CFlt -> "cc"
-              | CFnlt -> "cs"
-              | CFle -> "ls"
-              | CFnle -> "hi"
-              | CFgt -> "gt"
-              | CFngt -> "le"
-              | CFge -> "ge"
-              | CFnge -> "lt"
-            in
-            assert false
+            emit_get_reg i.arg.(0);
+            emit_get_reg i.arg.(1);
+            begin match cmp with
+            | CFeq ->
+                `	f64.eq\n`
+            | CFneq ->
+                `	f64.ne\n`
+            | CFlt ->
+                `	f64.lt\n`
+            | CFnlt ->
+                `	f64.lt\n`;
+                `	i32.eqz\n`
+            | CFle ->
+                `	f64.le\n`;
+            | CFnle ->
+                `	f64.le\n`;
+                `	i32.eqz\n`
+            | CFgt ->
+                `	f64.gt\n`
+            | CFngt ->
+                `	f64.gt\n`;
+                `	i32.eqz\n`
+            | CFge ->
+                `	f64.ge\n`
+            | CFnge ->
+                `	f64.ge\n`;
+                `	i32.eqz\n`
+            end;
+            `	br_if	{emit_int branch_idx}\n`
         | Ioddtest ->
             emit_get_reg i.arg.(0);
             `	i64.const 1\n`;
@@ -764,7 +1060,7 @@ let emit_instr env i =
         match reg with
         | {typ = Val} -> acc + 1
         | _ -> acc) i.live 0 in
-      let aligned_stack_val = ((num_live_ptrs-1) land (lnot(16-1))) + 16 in
+      let aligned_stack_val = ((8 * num_live_ptrs-1) land (lnot(16-1))) + 16 in
       `	i64.const {emit_label lbl}\n`;
       `	global.get __stack_pointer\n`;
       `	global.get __stack_pointer\n`;
@@ -816,113 +1112,38 @@ let emit_instr env i =
       emit_set_reg i.res.(0)
   | Wop(Icall_imm {func}) ->
       add_used_symbol func;
-      for j = 0 to Array.length i.arg - 1 do
-        emit_get_reg i.arg.(j);
-      done;
-      let func = match is_magic_function func with
-        | true -> func
-        | false -> func ^ "_raw"
-      in
-      let lbl = record_frame_label env i.live (Dbg_other i.dbg) in
-      fake_address_labels := lbl :: !fake_address_labels;
-      `{emit_label lbl}_fake:\n`;
-      `	global.get	__stack_pointer\n`;
-      `	i64.const	8\n`;
-      `	i64.sub\n`;
-      `	global.set	__stack_pointer\n`;
-      `	global.get	__stack_pointer\n`;
-      `	i64.const {emit_label lbl}\n`;
-      `	i64.store 0\n`;
-      (match Array.length i.res with
-      | 1 ->
-        (fun () -> `	call	{emit_symbol func}\n`) |>
-        emit_set_reg i.res.(0)
-      | 0 ->
-        `	call	{emit_symbol func}\n`;
-        `	drop\n`
-      | _ -> assert false);
-      `	global.get	__stack_pointer\n`;
-      `	i64.const	8\n`;
-      `	i64.add\n`;
-      `	global.set	__stack_pointer\n`;
+      emit_direct_call_args env i;
+      function_entry env i;
+      emit_direct_call func ~tailcall:false;
+      function_cleanup env i
   | Wop(Icall_ind) ->
-      for j = 1 to Array.length i.arg - 1 do
-        emit_get_reg i.arg.(j);
-      done;
-      emit_get_reg i.arg.(0);
-      let emit_args args =
-        emit_string
-          (String.concat ", "
-            (List.map (fun r -> get_type r.typ) (Array.to_list args |> List.tl)))
-      in
-      `	i32.wrap_i64\n`;
-      (fun () -> `	call_indirect ({emit_args i.arg}) -> (i64)\n`) |>
-      emit_set_reg i.res.(0);
-      record_frame env i.live (Dbg_other i.dbg)
+      emit_indirect_call_args env i;
+      function_entry env i;
+      emit_indirect_call i ~tailcall:false;
+      function_cleanup env i
   | Wop(Itailcall_imm { func; }) ->
       add_used_symbol func;
-      for j = 0 to Array.length i.arg - 1 do
-        emit_get_reg i.arg.(j);
-      done;
-      let func = match is_magic_function func with
-        | true -> func
-        | false -> func ^ "_raw"
-      in
+      emit_direct_call_args env i;
       output_epilogue env begin fun () ->
-      `	{emit_call func}\n`;
-        `	return\n`
+        emit_direct_call func ~tailcall:true;
       end
   | Wop(Itailcall_ind) ->
-      for j = 1 to Array.length i.arg - 1 do
-        emit_get_reg i.arg.(j);
-      done;
-      emit_get_reg i.arg.(0);
-      let emit_args args =
-        emit_string
-          (String.concat ", "
-            (List.map (fun r -> get_type r.typ) (Array.to_list args |> List.tl)))
-      in
-      `	i32.wrap_i64\n`;
-      `	call_indirect ({emit_args i.arg}) -> (i64)\n`;
+      emit_indirect_call_args env i;
       output_epilogue env begin fun () ->
-        `	return\n`
+        emit_indirect_call i ~tailcall:true;
       end
   | Wop(Iextcall{func; alloc = true}) ->
-      let lbl = record_frame_label env i.live (Dbg_other i.dbg) in
-      fake_address_labels := lbl :: !fake_address_labels;
-      `{emit_label lbl}_fake:\n`;
+      let lbl = record_frame env i.live (Dbg_other i.dbg) in
       `	i64.const {emit_label lbl}\n`;
       `	global.get __stack_pointer\n`;
       `	{emit_call "caml_before_c_call"}\n`;
-      add_used_symbol func;
-      for j = 0 to Array.length i.arg - 1 do
-        emit_get_reg i.arg.(j);
-      done;
-      (match Array.length i.res with
-      | 1 ->
-        (fun () -> `	call	{emit_symbol func}\n`) |>
-        emit_set_reg i.res.(0)
-      | 0 ->
-        `	call	{emit_symbol func}\n`;
-        if not (String.Set.mem func (String.Set.of_list ["caml_modify"; "caml_initialize"])) then
-          `	drop\n`;
-      | _ -> assert false);
-      `	{emit_call "caml_after_c_call"}\n`;
+      emit_ext_call env i func;
+      `	{emit_call "caml_after_c_call"}\n`
   | Wop(Iextcall{func; alloc = false}) ->
-      add_used_symbol func;
-      for j = 0 to Array.length i.arg - 1 do
-        emit_get_reg i.arg.(j);
-      done;
-      (match Array.length i.res with
-      | 1 ->
-        (fun () -> `	call	{emit_symbol func}\n`) |>
-        emit_set_reg i.res.(0)
-      | 0 ->
-        `	call	{emit_symbol func}\n`;
-        if not (String.Set.mem func (String.Set.of_list ["caml_modify"; "caml_initialize"])) then
-          `	drop\n`;
-      | _ -> assert false);
+      emit_ext_call env i func
   | Wop(Iconst_symbol s) ->
+      if String.starts_with ~prefix:"caml_c" s || String.starts_with ~prefix:"caml_t" s then
+        `	.type	{emit_symbol s}, @function\n`;
       (fun () -> `	i64.const	{emit_symbol s}\n`) |>
       emit_set_reg i.res.(0)
   | Wop(Iload(chunk, Iindexed ofs, _mut)) ->
@@ -942,17 +1163,17 @@ let emit_instr env i =
         | Byte_signed ->
             "i64.load8_s"
         | Sixteen_unsigned ->
-            failwith "Iload"
+            "i64.load16_u"
         | Sixteen_signed ->
-            failwith "Iload"
+            assert false
         | Thirtytwo_unsigned ->
-            failwith "Iload"
+            "i64.load32_u"
         | Thirtytwo_signed ->
-            failwith "Iload"
+            "i64.load32_s"
         | Single ->
-            failwith "Iload"
+            assert false
         | Double ->
-            failwith "Iload"
+            "f64.load"
       in
       `	{emit_string instr} 0\n`;
       emit_set_reg dst (fun _ -> ())
@@ -961,20 +1182,72 @@ let emit_instr env i =
       let dst = i.arg.(1) in
       begin match size with
       | Byte_unsigned | Byte_signed ->
-          failwith "Istore"
+          emit_get_reg dst;
+          `	i64.const    {emit_int ofs}\n`;
+          `	i64.add\n`;
+          emit_get_reg src;
+          `	i64.store8    0\n`
       | Sixteen_unsigned | Sixteen_signed ->
-          failwith "Istore"
+          emit_get_reg dst;
+          `	i64.const    {emit_int ofs}\n`;
+          `	i64.add\n`;
+          emit_get_reg src;
+          `	i64.store16    0\n`
       | Thirtytwo_unsigned | Thirtytwo_signed ->
-          failwith "Istore"
+          emit_get_reg dst;
+          `	i64.const    {emit_int ofs}\n`;
+          `	i64.add\n`;
+          emit_get_reg src;
+          `	i64.store32    0\n`
       | Single ->
-          failwith "Istore"
+          assert false
       | Word_int ->
           emit_store src dst ~ofs
       | Double ->
-          failwith "Istore"
+          emit_get_reg dst;
+          `	i64.const    {emit_int ofs}\n`;
+          `	i64.add\n`;
+          emit_get_reg src;
+          `	f64.store    0\n`
       | Word_val ->
           emit_store src dst ~ofs
       end
+  | Wop(Iintop (Icomp cmp)) ->
+      let comp = name_for_comparison cmp in
+      (fun () ->
+      emit_get_reg i.arg.(0);
+      emit_get_reg i.arg.(1);
+      `	{emit_string comp}\n`;
+      `	i64.extend_i32_u\n`;
+      ) |>
+      emit_set_reg i.res.(0)
+  | Wop(Iintop_imm (Icomp cmp, n)) ->
+      let comp = name_for_comparison cmp in
+      (fun () ->
+      emit_get_reg i.arg.(0);
+      `	i64.const	{emit_int n}\n`;
+      `	{emit_string comp}\n`;
+      `	i64.extend_i32_u\n`;
+      ) |>
+      emit_set_reg i.res.(0)
+  | Wop(Iintop (Icheckbound)) ->
+    emit_get_reg i.arg.(1);
+    emit_get_reg i.arg.(0);
+    `	i64.ge_u\n`;
+    `	if\n`;
+    let lbl = record_frame env Reg.Set.empty (Dbg_other i.dbg) in
+    `	i64.const {emit_label lbl}\n`;
+    `	{emit_call "caml_ml_array_bound_error"}\n`;
+    `	end_if\n`;
+  | Wop(Iintop_imm(Icheckbound, n)) ->
+    `	i64.const    {emit_int n}\n`;
+    emit_get_reg i.arg.(0);
+    `	i64.ge_u\n`;
+    `	if\n`;
+    let lbl = record_frame env Reg.Set.empty (Dbg_other i.dbg) in
+    `	i64.const {emit_label lbl}\n`;
+    `	{emit_call "caml_ml_array_bound_error"}\n`;
+    `	end_if\n`;
   | Wop(Iintop op) ->
       let instr = name_for_int_operation op in
       assert (get_type (i.arg.(0).typ) = get_type (i.arg.(1).typ));
@@ -995,15 +1268,15 @@ let emit_instr env i =
         | Addr, Val
         | Val, Addr
         | Val, Val
-        | Int, Int ->
+        | Addr, Addr
+        | Int, Int
+        | Float, Float ->
             (fun () -> emit_get_reg src) |>
             emit_set_reg dst;
-        | Addr, Addr ->
-            assert false
-        | Int, Val ->
-            assert false
-        | Int, Addr ->
-            assert false
+        | Int, (Val | Addr) ->
+            (fun () ->
+            emit_get_reg src) |>
+            emit_set_reg dst;
         | Float, _ ->
             assert false
         | _, Float ->
@@ -1021,37 +1294,84 @@ let emit_instr env i =
       emit_conversion i.arg.(0).typ i.res.(0).typ) |>
       emit_set_reg i.res.(0)
   | Wop(Ispecific _) -> assert false
-  | Wop(op) ->
-      Printmach.operation op i.arg Format.std_formatter i.res;
-      if not (Debuginfo.is_none i.dbg) && !Clflags.locations then
-        Format.fprintf Format.std_formatter " %s" (Debuginfo.to_string i.dbg);
-      failwith "unknown op"
+  | Wop(Iabsf | Inegf | Ifloatofint as op) ->
+      let instr = match op with
+      | Iabsf -> "abs"
+      | Inegf -> "neg"
+      | Ifloatofint -> "convert_i64_s"
+      | _     -> assert false
+      in
+      (fun () ->
+      emit_get_reg i.arg.(0);
+      `	f64.{emit_string instr}\n`;
+      ) |>
+      emit_set_reg i.res.(0)
+  | Wop(Iaddf | Isubf | Imulf | Idivf as op) ->
+      let instr = match op with
+      | Iaddf -> "add"
+      | Isubf -> "sub"
+      | Imulf -> "mul"
+      | Idivf -> "div"
+      | _     -> assert false
+      in
+      (fun () ->
+      emit_get_reg i.arg.(0);
+      emit_get_reg i.arg.(1);
+      `	f64.{emit_string instr}\n`;
+      ) |>
+      emit_set_reg i.res.(0)
+  | Wop(Iintoffloat) ->
+      (fun () ->
+      emit_get_reg i.arg.(0);
+      `	i64.trunc_f64_s\n`;
+      ) |>
+      emit_set_reg i.res.(0)
+  | Wop(Iconst_float f) ->
+      (fun () ->
+      let float = Int64.float_of_bits f in
+      let f_str = Printf.sprintf "%h" float in
+      `	f64.const { emit_string f_str }\n`;
+      ) |>
+      emit_set_reg i.res.(0);
   | Wraise k ->
+      assert (Array.length i.arg = 1);
       begin match k with
       | Lambda.Raise_regular ->
-          assert false
-          (* I.mov (int 0) (domain_field Domainstate.Domain_backtrace_pos); *)
-          (* emit_call "caml_raise_exn"; *)
-          (* record_frame env Reg.Set.empty (Dbg_raise i.dbg) *)
+          (fun () ->
+          `	i64.const 0\n`;
+          ) |>
+          set_domain_field Domainstate.Domain_backtrace_pos;
+          let lbl = record_frame_label env Reg.Set.empty (Dbg_raise i.dbg) in
+          fake_address_labels := lbl :: !fake_address_labels;
+          `{emit_label lbl}_fake:\n`;
+          emit_get_reg i.arg.(0);
+          `	i64.const {emit_label lbl}\n`;
+          `	{emit_call "caml_raise_exn"}\n`;
+          `	unreachable\n`;
       | Lambda.Raise_reraise ->
-          assert false
-          (* emit_call "caml_raise_exn"; *)
-          (* record_frame env Reg.Set.empty (Dbg_raise i.dbg) *)
+          let lbl = record_frame_label env Reg.Set.empty (Dbg_raise i.dbg) in
+          fake_address_labels := lbl :: !fake_address_labels;
+          `{emit_label lbl}_fake:\n`;
+          emit_get_reg i.arg.(0);
+          `	i64.const {emit_label lbl}\n`;
+          `	{emit_call "caml_raise_exn"}\n`;
+          `	unreachable\n`;
       | Lambda.Raise_notrace ->
           get_domain_field Domainstate.Domain_exception_pointer;
-          `	i64.const 16\n`;
-          `	i64.add\n`;
           `	global.set __stack_pointer\n`;
           (fun () ->
           `	global.get __stack_pointer\n`;
-          `	i64.load 8\n`;
+          `	i64.load 0\n`;
           ) |>
           set_domain_field Domainstate.Domain_exception_pointer;
           `	global.get __stack_pointer\n`;
-          `	i64.load 0\n`;
-          (* I.pop (domain_field Domainstate.Domain_exception_pointer); *)
-          (* I.pop r11; *)
-          (* I.jmp r11 *)
+          `	i64.const 16\n`;
+          `	i64.add\n`;
+          `	global.set __stack_pointer\n`;
+          emit_get_reg i.arg.(0);
+          `	throw __ocaml_exception\n`;
+          `	drop\n`;
+          `	unreachable\n`;
       end
   | Wcondbranch3 (_, _, _) -> assert false
 
@@ -1137,15 +1457,20 @@ let emit_called_funcs fundecl =
       if not (String.Set.mem func !symbols_defined) then
         `	.functype {emit_symbol func} ({emit_args i.arg}) -> (i64)\n`;
       emit_funcs i.next
-  | Linear.{ desc = Lop(Iextcall { func = "caml_modify" }) } as i ->
-      `	.functype caml_modify (i64, i64) -> ()\n`;
-      emit_funcs i.next
-  | Linear.{ desc = Lop(Iextcall { func = "caml_initialize" }) } as i ->
-      `	.functype caml_initialize (i64, i64) -> ()\n`;
-      emit_funcs i.next
-  | Linear.{ desc = Lop(Iextcall {func}) } as i ->
-      `	.functype {emit_symbol func} ({emit_args i.arg}) -> (i64)\n`;
-      emit_funcs i.next
+  | Linear.({ desc = Lop(Iextcall { func }) } as i) ->
+      begin match get_ext_func_type_override func with
+      | Some (args, res) ->
+        `	.functype {emit_symbol func} ({emit_wasm_types args}) -> ({emit_wasm_types res})\n`;
+        emit_funcs i.next
+      | None ->
+        let dst_typ = match Array.to_list i.res with
+        | [] -> "i64"
+        | [ {typ = Float} ] -> "f64"
+        | [ _ ] -> "i64"
+        | _ -> assert false in
+        `	.functype {emit_symbol func} ({emit_args i.arg}) -> ({emit_string dst_typ})\n`;
+        emit_funcs i.next
+      end
   | i -> emit_funcs i.next
   in
   emit_funcs fundecl.fun_body
@@ -1155,7 +1480,7 @@ let fundecl fundecl =
   fake_address_labels := [];
   emit_named_text_section fundecl.fun_name;
   let { fun_name; _ } = fundecl in
-  Printf.printf "%s\n" fun_name;
+  (* Printf.printf "%s\n" fun_name; *)
   let fun_name = match is_magic_function fun_name with
     | true -> fun_name
     | false -> fun_name ^ "_raw"
@@ -1187,12 +1512,12 @@ let fundecl fundecl =
     `	.globl	{emit_symbol (fundecl.fun_name)}\n`;
     `	.type	{emit_symbol fundecl.fun_name}, @function\n`;
     `{emit_symbol fundecl.fun_name}:\n`;
-    let args = String.concat ", " ((List.map (fun r -> get_type r.typ) (Array.to_list fundecl.fun_args)) @ ["i64"]) in
+    let args = String.concat ", " ((List.map (fun r -> get_type r.typ) (Array.to_list fundecl.fun_args)) @ (if fundecl.fun_uses_env then [] else ["i64"])) in
     `	.functype {emit_symbol fundecl.fun_name} ({emit_string args}) -> (i64)\n`;
       for j = 0 to Array.length fundecl.fun_args - 1 do
         `	local.get {emit_int j}\n`;
       done;
-      `	call {emit_symbol fun_name}\n`;
+      `	return_call {emit_symbol fun_name}\n`;
       `	end_function\n`;
   end;
   if !fake_address_labels <> [] then begin
@@ -1229,7 +1554,7 @@ let set_current_symbol s =
       `	.size	{emit_symbol !current_symbol}, .-{emit_symbol !current_symbol}\n`;
     current_symbol := s
 
-let emit_item closure = function
+let emit_item is_closure = function
   | Cglobal_symbol s ->
       set_current_symbol s;
       declare_global_data s
@@ -1250,7 +1575,7 @@ let emit_item closure = function
   | Cdouble f ->
       emit_float64_directive ".quad" (Int64.bits_of_float f)
   | Csymbol_address s ->
-      if closure then
+      if is_closure then
           `	.type	{emit_symbol s}, @function\n`;
       `	.quad	{emit_symbol s}\n`
   | Cstring s ->
@@ -1262,7 +1587,7 @@ let emit_item closure = function
 
 (* Emission of data *)
 let data l =
-  let closure =
+  let is_closure =
     match l  with
     | Cint n :: _ when ((Nativeint.to_int n) land 0xFF) == 0xF7 -> true
     | Csymbol_address _ :: _ -> true
@@ -1272,7 +1597,8 @@ let data l =
   | [] -> ()
   | _ ->
   `	{emit_string data_space}\n`;
-  List.iter (emit_item closure) l;
+  `	.align 8\n`;
+  List.iter (emit_item is_closure) l;
   set_current_symbol ""
 
 (* Beginning / end of an assembly file *)
@@ -1293,12 +1619,15 @@ let begin_assembly() =
   declare_global_data lbl_begin;
   `{emit_symbol lbl_begin}:\n`;
   emit_symbol_size lbl_begin;
+  `	.tagtype	__ocaml_exception i64\n`;
   `	.globaltype	__caml_young_ptr, i64\n`;
   `	.globaltype	__caml_state, i64\n`;
   `	.globaltype	__stack_pointer, i64\n`;
   `	.functype	caml_before_c_call (i64, i64) -> ()\n`;
   `	.functype	caml_after_c_call () -> ()\n`;
   `	.functype	caml_call_gc (i64, i64) -> ()\n`;
+  `	.functype	caml_raise_exn (i64, i64) -> ()\n`;
+  `	.functype	caml_ml_array_bound_error (i64) -> ()\n`;
   ()
 
 let end_assembly() =

@@ -134,7 +134,7 @@ ifeq "$(UNIX_OR_WIN32)" "unix"
 ASPPFLAGS += -DMODEL_$(MODEL)
 endif
 ifeq "$(ARCH)" "wasm32"
-ASPPFLAGS += -sMEMORY64
+ASPPFLAGS += -sMEMORY64 -mexception-handling
 endif
 
 

@@ -1,5 +1,7 @@
 #include "caml/m.h"
 
+        .tagtype __ocaml_exception i64
+        .global __ocaml_exception
         .globaltype __stack_pointer, i64
         .globaltype __caml_young_ptr, i64
         .globaltype __caml_state, i64
@@ -20,6 +22,7 @@
 #define domain_field_caml_bottom_of_stack 208 /* 8 * 26 */
 #define domain_field_caml_last_return_address 216 /* 8 * 27 */
 #define domain_field_caml_gc_regs 224 /* 8 * 28 */
+#define domain_field_caml_backtrace_active 232 /* 8 * 29 */
 #define Caml_state(var) domain_field_caml_##var
 
 #define L(lbl) .L##lbl
@@ -75,9 +78,8 @@ END_FUNCTION(caml_after_c_call)
 
 .functype caml_program () -> (i64)
 
-FUNCTION(caml_start_program)
-        .functype caml_start_program (i64) -> (i64)
-        .local i64
+FUNCTION(prepare_for_ocaml)
+        .functype prepare_for_ocaml (i64) -> ()
 
         local.get 0
         global.set __caml_state
@@ -121,18 +123,71 @@ FUNCTION(caml_start_program)
         i64.store 0
 
         global.get __caml_state
-        i64.load Caml_state(exception_pointer)
-        local.get 0
-        i64.store 0
+        global.get __stack_pointer
+        i64.store Caml_state(exception_pointer)
 
         local.get 0
         i64.const L(caml_retaddr)
         i64.store 0
+END_FUNCTION(prepare_for_ocaml)
 
+FUNCTION(cleanup_ocaml)
+        .functype cleanup_ocaml () -> ()
+        .local i64
+
+        global.get __caml_state
+        global.get __caml_young_ptr
+        i64.store    Caml_state(young_ptr)
+
+        global.get __stack_pointer
+        local.tee 0
+        i64.const 16
+        i64.add
+        local.tee 0
+        global.set __stack_pointer
+
+        global.get __caml_state
+        local.get 0
+        i64.load 8
+        i64.store Caml_state(bottom_of_stack)
+
+        global.get __caml_state
+        local.get 0
+        i64.load 16
+        i64.store Caml_state(last_return_address)
+
+        global.get __caml_state
+        local.get 0
+        i64.load 24
+        i64.store Caml_state(gc_regs)
+
+        global.get __stack_pointer
+        i64.const 40
+        i64.add
+        local.tee 0
+        global.set __stack_pointer
+
+END_FUNCTION(cleanup_ocaml)
+
+FUNCTION(caml_start_program)
+        .functype caml_start_program (i64) -> (i64)
+        .local i64
+
+        local.get 0
+        call prepare_for_ocaml
+
+        try
         call caml_program
-L(caml_retaddr_fake):
-        drop
-        i64.const 0
+        local.set 0
+        catch __ocaml_exception
+        i64.const 2
+        i64.or
+        local.set 0
+        end_try
+
+        call cleanup_ocaml
+        local.get 0
+        return
 END_FUNCTION(caml_start_program)
 
 .section .data,"",@
@@ -140,15 +195,91 @@ L(caml_retaddr):
   .byte 0
   .size L(caml_retaddr), 1
 
+.functype caml_stash_backtrace (i64, i64, i64, i64) -> ()
 FUNCTION(caml_raise_exn)
-        .functype caml_raise_exn () -> ()
-        call caml_raise_exn
+        .functype caml_raise_exn (i64, i64) -> ()
+        .local i64
+
+        global.get __caml_state
+        i64.load Caml_state(backtrace_active)
+        i64.eqz
+        i32.eqz
+        if
+
+        local.get 0
+
+        local.get 1
+
+        global.get __stack_pointer
+
+        global.get __caml_state
+        i64.load Caml_state(exception_pointer)
+
+        call caml_stash_backtrace
+        end_if
+
+        global.get __caml_state
+        i64.load Caml_state(exception_pointer)
+        local.tee 2
+        i64.const 16
+        i64.add
+        global.set __stack_pointer
+
+        global.get __caml_state
+        local.get 2
+        i64.load 0
+        i64.store Caml_state(exception_pointer)
+
+        local.get 0
+        throw __ocaml_exception
+        unreachable
 END_FUNCTION(caml_raise_exn)
 
 /* Raise an exception from C */
 
 FUNCTION(caml_raise_exception)
         .functype caml_raise_exception (i64, i64) -> ()
+        local.get 0
+        global.set __caml_state
+
+
+        local.get 0
+        i64.load Caml_state(backtrace_active)
+        i64.eqz
+        i32.eqz
+        if
+        local.get 1
+
+        local.get 0
+        i64.load Caml_state(last_return_address)
+
+        local.get 0
+        i64.load Caml_state(bottom_of_stack)
+
+        local.get 0
+        i64.load Caml_state(exception_pointer)
+
+        call caml_stash_backtrace
+        end_if
+
+        global.get __caml_state
+        i64.load Caml_state(exception_pointer)
+        local.tee 0
+        i64.const 16
+        i64.add
+        global.set __stack_pointer
+
+        global.get __caml_state
+        local.get 0
+        i64.load 0
+        i64.store Caml_state(exception_pointer)
+
+        global.get __caml_state
+        i64.load Caml_state(young_ptr)
+        global.set __caml_young_ptr
+
+        local.get 1
+        throw __ocaml_exception
         unreachable
 
 END_FUNCTION(caml_raise_exception)
@@ -167,18 +298,93 @@ END_FUNCTION(caml_stack_overflow)
 /* Callback from C to OCaml */
 FUNCTION(caml_callback_asm)
         .functype caml_callback_asm (i64, i64, i64) -> (i64)
-        unreachable
+        local.get 0
+        call prepare_for_ocaml
+
+        try
+        local.get 2
+        i64.load 0
+        local.get 1
+        local.get 1
+        i64.load 0
+        i32.wrap_i64
+        call_indirect (i64, i64) -> (i64)
+        local.set 0
+        catch __ocaml_exception
+        i64.const 2
+        i64.or
+        local.set 0
+        end_try
+
+        call cleanup_ocaml
+        local.get 0
+        return
 END_FUNCTION(caml_callback_asm)
+
+.functype caml_apply2 (i64, i64, i64) -> (i64)
 
 FUNCTION(caml_callback2_asm)
         .functype caml_callback2_asm (i64, i64, i64) -> (i64)
-        unreachable
+        .local i64
+
+        local.get 0
+        call prepare_for_ocaml
+
+        try
+        local.get 2
+        i64.load 0
+        local.get 2
+        i64.load 8
+        local.get 1
+        call caml_apply2
+        local.set 0
+        catch __ocaml_exception
+        i64.const 2
+        i64.or
+        local.set 0
+        end_try
+
+        call cleanup_ocaml
+        local.get 0
+        return
 END_FUNCTION(caml_callback2_asm)
 
+.functype caml_apply3 (i64, i64, i64, i64) -> (i64)
 FUNCTION(caml_callback3_asm)
         .functype caml_callback3_asm (i64, i64, i64) -> (i64)
-        unreachable
+        local.get 0
+        call prepare_for_ocaml
+
+        try
+        local.get 2
+        i64.load 0
+        local.get 2
+        i64.load 8
+        local.get 2
+        i64.load 16
+        local.get 1
+        call caml_apply3
+        local.set 0
+        catch __ocaml_exception
+        i64.const 2
+        i64.or
+        local.set 0
+        end_try
+
+        call cleanup_ocaml
+        local.get 0
+        return
 END_FUNCTION(caml_callback3_asm)
+
+.functype caml_array_bound_error () -> ()
+FUNCTION(caml_ml_array_bound_error)
+        .functype caml_ml_array_bound_error (i64) -> ()
+        local.get 0
+        global.get __stack_pointer
+        call caml_before_c_call
+        call caml_array_bound_error
+        call caml_after_c_call
+END_FUNCTION(caml_ml_array_bound_error)
 
         .section .data,"",@
         .globl  __caml_young_ptr
@@ -205,13 +411,14 @@ caml_system__code_end:
         .size   caml_system__code_end, .-caml_system__code_end
 
         .section .data,"",@
-        .align  3
         .globl  caml_system__frametable
         .type   caml_system__frametable, @object
+        .align  8
 caml_system__frametable:
         .quad   1               /* one descriptor */
         .quad   L(caml_retaddr) /* return address into callback */
         .short  -1              /* negative frame size => use callback link */
         .short  0               /* no roots */
-        .align  3
         .size   caml_system__frametable, .-caml_system__frametable
+
+__ocaml_exception:

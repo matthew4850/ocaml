@@ -1381,6 +1381,9 @@ let transl_function f =
   in
   Cfunction {fun_name = f.label;
              fun_args = List.map (fun (id, _) -> (id, typ_val)) f.params;
+             fun_uses_env = Option.fold ~none:false ~some:(fun env ->
+               List.exists (fun (id, _) -> Ident.same (VP.var id) env) f.params
+             ) f.env;
              fun_body = cmm_body;
              fun_codegen_options;
              fun_poll = f.poll;
@@ -1475,6 +1478,7 @@ let compunit (ulam, preallocated_blocks, constants) =
       transl empty_env ulam in
   let c1 = [Cfunction {fun_name = Compilenv.make_symbol (Some "entry");
                        fun_args = [];
+                       fun_uses_env = false;
                        fun_body = init_code;
                        (* This function is often large and run only once.
                           Compilation time matter more than runtime.

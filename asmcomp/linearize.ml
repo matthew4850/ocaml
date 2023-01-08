@@ -328,6 +328,7 @@ let fundecl f =
   in
   { fun_name = f.Mach.fun_name;
     fun_args = f.Mach.fun_args;
+    fun_uses_env = f.Mach.fun_uses_env;
     fun_body;
     fun_fast = not (List.mem Cmm.Reduce_code_size f.Mach.fun_codegen_options);
     fun_dbg  = f.Mach.fun_dbg;

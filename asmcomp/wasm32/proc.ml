@@ -175,6 +175,6 @@ let stack_ptr_dwarf_register_number = 0
 
 let assemble_file infile outfile =
   Ccomp.command
-    (Config.asm ^ " -sMEMORY64 -o " ^ Filename.quote outfile ^ " " ^ Filename.quote infile)
+    (Config.asm ^ " -mexception-handling -mtail-call -sMEMORY64 -Wno-experimental -o " ^ Filename.quote outfile ^ " " ^ Filename.quote infile)
 
 let init () = ()

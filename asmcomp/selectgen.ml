@@ -1190,6 +1190,7 @@ method emit_fundecl ~future_funcnames f =
   instr_iter (fun instr -> self#mark_instr instr.Mach.desc) body_with_prologue;
   { fun_name = f.Cmm.fun_name;
     fun_args = loc_arg;
+    fun_uses_env = f.Cmm.fun_uses_env;
     fun_body = body_with_prologue;
     fun_codegen_options = f.Cmm.fun_codegen_options;
     fun_dbg  = f.Cmm.fun_dbg;

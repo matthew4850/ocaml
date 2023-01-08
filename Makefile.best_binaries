@@ -39,7 +39,7 @@ or rebuilding it (or `touch`-ing it) if you want it used.), \
 choose_best = $(strip $(if \
    $(and $(USE_BEST_BINARIES),$(wildcard $(ROOTDIR)/$1.opt$(EXE)),$(strip \
       $(call check_not_stale,$1$(EXE),$1.opt$(EXE)))), \
-    $(ROOTDIR)/$1.opt$(EXE), \
+    node --experimental-wasm-memory64 --experimental-wasm-return_call $(ROOTDIR)/$1.opt$(EXE), \
     $(OCAMLRUN) $(ROOTDIR)/$1$(EXE)))
 
 BEST_OCAMLC := $(call choose_best,ocamlc)
@@ -55,5 +55,5 @@ BEST_OCAMLLEX := $(call choose_best,lex/ocamllex)
 BEST_OCAMLDEP := $(strip $(if \
    $(and $(USE_BEST_BINARIES),$(wildcard $(ROOTDIR)/ocamlc.opt$(EXE)),$(strip \
       $(call check_not_stale,boot/ocamlc,ocamlc.opt$(EXE)))), \
-    $(ROOTDIR)/ocamlc.opt$(EXE) -depend, \
+    node --experimental-wasm-memory64 --experimental-wasm-return_call $(ROOTDIR)/ocamlc.opt$(EXE) -depend, \
     $(BOOT_OCAMLC) -depend))

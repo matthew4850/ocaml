@@ -410,6 +410,7 @@ let fundecl f =
   reset ();
   { fun_name = f.fun_name;
     fun_args = f.fun_args;
+    fun_uses_env = f.fun_uses_env;
     fun_body = new_body;
     fun_codegen_options = f.fun_codegen_options;
     fun_poll = f.fun_poll;
