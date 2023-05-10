@@ -150,8 +150,8 @@ let linear i n contains_calls =
         let n = linear i.Mach.next n in
         let op, n =
           match n.desc with
-          | Lbranch lbl ->
-            Mach.Ipoll { return_label = Some lbl }, n.next
+          (* | Lbranch lbl -> *)
+          (*   Mach.Ipoll { return_label = Some lbl }, n.next *)
           | _ -> op, n
         in
         copy_instr (Lop op) i n
