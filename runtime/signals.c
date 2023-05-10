@@ -37,6 +37,12 @@
 #define NSIG 64
 #endif
 
+#ifdef __wasm__
+int sigsuspend(const sigset_t *mask){
+  return ENOSYS;
+}
+#endif
+
 CAMLexport int volatile caml_something_to_do = 0;
 
 /* The set of pending signals (received but not yet processed) */

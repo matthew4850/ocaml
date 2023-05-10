@@ -24,9 +24,30 @@
 #include <sys/time.h>
 #include <sys/resource.h>
 #endif
+#include <emscripten.h>
 
 CAMLprim value unix_times(value unit)
 {
+  double* data = EM_ASM_PTR({
+    const process = require('process');
+    const usage = process.cpuUsage();
+    const data = _malloc(16);
+    setValue(data, usage["user"]/1e6, "double");
+    setValue(data+8, usage["system"]/1e6, "double");
+    return data;
+  });
+
+  value res;
+
+  res = caml_alloc_small(4 * Double_wosize, Double_array_tag);
+
+  Store_double_field (res, 0, data[0]);
+  Store_double_field (res, 1, data[1]);
+  Store_double_field (res, 2, 0);
+  Store_double_field (res, 3, 0);
+  free(data);
+  return res;
+  /*
 #ifdef HAS_GETRUSAGE
 
   value res;
@@ -64,4 +85,5 @@ CAMLprim value unix_times(value unit)
   return res;
 
 #endif
+  */
 }
