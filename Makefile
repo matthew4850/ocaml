@@ -638,20 +638,9 @@ partialclean::
 	rm -rf ocamlc$(EXE)
 
 # The native-code compiler
-otherlibs/binaryen/binaryen.cma:
-	$(MAKE) -C otherlibs/binaryen all
-
-ifneq ($(ARCH), wasm32-test)
 ocamlopt$(EXE): compilerlibs/ocamlcommon.cma compilerlibs/ocamloptcomp.cma \
           $(OPTSTART)
 	$(CAMLC) $(LINKFLAGS) -o $@ $^
-else
-ocamlopt$(EXE): compilerlibs/ocamlcommon.cma otherlibs/binaryen/binaryen.cma \
-          compilerlibs/ocamloptcomp.cma $(OPTSTART)
-	$(OCAMLRUN) $(ROOTDIR)/ocamlc -g -nostdlib -I boot \
-		$(LINKFLAGS) -I otherlibs/binaryen -cclib -Iruntime -output-complete-exe -o $@ $^
-
-endif
 
 partialclean::
 	rm -f ocamlopt$(EXE)
@@ -814,7 +803,7 @@ clean::
 	$(MAKE) -C runtime clean
 	rm -f stdlib/libcamlrun.a stdlib/libcamlrun.lib
 
-otherlibs_all := bigarray binaryen dynlink \
+otherlibs_all := bigarray dynlink \
   str systhreads unix win32unix
 subdirs := debugger lex ocamldoc ocamltest stdlib tools \
   $(addprefix otherlibs/, $(otherlibs_all)) \

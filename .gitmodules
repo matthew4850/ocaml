@@ -1,9 +1,3 @@
 [submodule "flexdll"]
     path = flexdll
     url = https://github.com/alainfrisch/flexdll.git
-[submodule "otherlibs/binaryen/binaryen.ml"]
-    path = otherlibs/binaryen/binaryen_ml
-    url = https://github.com/grain-lang/binaryen.ml
-[submodule "otherlibs/binaryen/binaryen"]
-    path = otherlibs/binaryen/binaryen
-    url = https://github.com/WebAssembly/binaryen/

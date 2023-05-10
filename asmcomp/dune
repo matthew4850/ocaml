@@ -23,7 +23,7 @@
           (glob_files power/*.ml)
           (glob_files riscv/*.ml)
           (glob_files s390x/*.ml)
-          (glob_files wasm32/*.ml))
+          (glob_files wasm64/*.ml))
  (action  (bash "cp `grep '^ARCH=' %{conf} | cut -d'=' -f2`/*.ml .")))
 
 (rule
@@ -37,7 +37,7 @@
           power/emit.mlp
           riscv/emit.mlp
           s390x/emit.mlp
-          wasm32/emit.mlp)
+          wasm64/emit.mlp)
  (action
    (progn
      (with-stdout-to contains-input-name

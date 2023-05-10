@@ -75,7 +75,7 @@
 #define Callback_link(sp) ((struct caml_context *)((sp) + 16))
 #endif
 
-#ifdef TARGET_wasm32
+#ifdef TARGET_wasm64
 #define Saved_return_address(sp) *((intnat *)((sp) - 8))
 #define Callback_link(sp) ((struct caml_context *)((sp) + 16))
 #endif

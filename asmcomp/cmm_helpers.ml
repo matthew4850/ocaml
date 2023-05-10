@@ -445,7 +445,7 @@ let rec div_int c1 c2 is_safe dbg =
           dbg
       else begin
         match Config.architecture with
-        | "wasm32" -> Cop(Cdivi, [c1; c2], dbg)
+        | "wasm64" -> Cop(Cdivi, [c1; c2], dbg)
         | _ ->
           let (m, p) = divimm_parameters (Nativeint.of_int n) in
           (* Algorithm:

@@ -842,7 +842,8 @@ AS_CASE([$cc_basename,$host],
   [gcc*,powerpc-*-linux*],
     [oc_ldflags="-mbss-plt"],
   [*,*-emscripten],
-  [mkexe="$mkexe -sNODERAWFS=1 -sALLOW_MEMORY_GROWTH=1"]
+    [mkexedebugflag="-g"
+    mkexe="$mkexe -sNODERAWFS=1 -sALLOW_MEMORY_GROWTH=1"]
 )
 
 
@@ -971,6 +972,13 @@ AS_IF([test x"$enable_shared" != "xno"],
       mksharedlib="$CC -shared"
       rpath="-Wl,-rpath,"
       mksharedlibrpath="-Wl,-rpath,"
+      supports_shared_libraries=true],
+   [*-*-emscripten],
+      [sharedlib_cflags="-fPIC"
+      mksharedlib="$CC -shared -sSIDE_MODULE -sMEMORY64 -Wl,--features=memory64"
+      rpath="-Wl,-rpath,"
+      mksharedlibrpath="-Wl,-rpath,"
+      natdynlinkopts="-Wl,-E"
       supports_shared_libraries=true],
     [[*-*-linux*|*-*-freebsd[3-9]*|*-*-freebsd[1-9][0-9]*\
     |*-*-openbsd*|*-*-netbsd*|*-*-dragonfly*|*-*-gnu*|*-*-haiku*]],
@@ -1145,7 +1153,7 @@ AS_CASE([$host],
   [riscv64-*-linux*],
     [arch=riscv; model=riscv64; system=linux]
   [wasm64-*-emscripten],
-    [arch=wasm32; system=emscripten]
+    [arch=wasm64; system=emscripten]
 )
 
 AS_IF([test x"$enable_native_compiler" = "xno"],
@@ -1294,11 +1302,13 @@ AS_IF([$has_c99_float_ops],
          C99 float ops unavailable, replacements enabled
          (ancient Visual Studio)]))])])])
 
-## getrusage
-AC_CHECK_FUNC([getrusage], [AC_DEFINE([HAS_GETRUSAGE])])
+## get rusage
+AS_IF(test [$arch] != "wasm64",
+      AC_CHECK_FUNC([getrusage], [AC_DEFINE([HAS_GETRUSAGE])]))
 
 ## times
-AC_CHECK_FUNC([times], [AC_DEFINE([HAS_TIMES])])
+AS_IF(test [$arch] != "wasm64",
+      AC_CHECK_FUNC([times], [AC_DEFINE([HAS_TIMES])]))
 
 ## secure_getenv and __secure_getenv
 
@@ -1713,9 +1723,11 @@ AS_CASE([$ac_cv_func_which_gethostbyname_r],
 
 AX_FUNC_WHICH_GETHOSTBYADDR_R
 
-AS_CASE([$ac_cv_func_which_gethostbyaddr_r],
-  [eight], [AC_DEFINE([HAS_GETHOSTBYADDR_R],[8])],
-  [seven], [AC_DEFINE([HAS_GETHOSTBYADDR_R],[7])])
+AS_CASE([$arch],
+  [wasm64], [AC_MSG_RESULT([no])],
+  [AS_CASE([$ac_cv_func_which_gethostbyaddr_r],
+    [eight], [AC_DEFINE([HAS_GETHOSTBYADDR_R],[8])],
+    [seven], [AC_DEFINE([HAS_GETHOSTBYADDR_R],[7])])])
 
 ## mkstemp
 

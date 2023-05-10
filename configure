@@ -14012,6 +14012,7 @@ esac
   gcc*,powerpc-*-linux*) :
     oc_ldflags="-mbss-plt" ;; #(
   *,*-emscripten) :
+    mkexedebugflag="-g"
     mkexe="$mkexe -sNODERAWFS=1 -sALLOW_MEMORY_GROWTH=1"
  ;; #(
   *) :
@@ -14842,6 +14843,13 @@ esac ;; #(
       rpath="-Wl,-rpath,"
       mksharedlibrpath="-Wl,-rpath,"
       supports_shared_libraries=true ;; #(
+  *-*-emscripten) :
+    sharedlib_cflags="-fPIC"
+      mksharedlib="$CC -shared -sSIDE_MODULE -sMEMORY64 -Wl,--features=memory64"
+      rpath="-Wl,-rpath,"
+      mksharedlibrpath="-Wl,-rpath,"
+      natdynlinkopts="-Wl,-E"
+      supports_shared_libraries=true ;; #(
   *-*-linux*|*-*-freebsd[3-9]*|*-*-freebsd[1-9][0-9]*\
     |*-*-openbsd*|*-*-netbsd*|*-*-dragonfly*|*-*-gnu*|*-*-haiku*) :
     sharedlib_cflags="-fPIC"
@@ -15133,7 +15141,7 @@ fi; system=elf ;; #(
     arch=riscv; model=riscv64; system=linux
   wasm64-*-emscripten ;; #(
   *) :
-    arch=wasm32; system=emscripten
+    arch=wasm64; system=emscripten
  ;;
 esac
 
@@ -15699,23 +15707,29 @@ fi
 fi
 fi
 
-## getrusage
-ac_fn_c_check_func "$LINENO" "getrusage" "ac_cv_func_getrusage"
+## get rusage
+if test $arch != "wasm64"
+then :
+  ac_fn_c_check_func "$LINENO" "getrusage" "ac_cv_func_getrusage"
 if test "x$ac_cv_func_getrusage" = xyes
 then :
   printf "%s\n" "#define HAS_GETRUSAGE 1" >>confdefs.h
 
 fi
 
+fi
 
 ## times
-ac_fn_c_check_func "$LINENO" "times" "ac_cv_func_times"
+if test $arch != "wasm64"
+then :
+  ac_fn_c_check_func "$LINENO" "times" "ac_cv_func_times"
 if test "x$ac_cv_func_times" = xyes
 then :
   printf "%s\n" "#define HAS_TIMES 1" >>confdefs.h
 
 fi
 
+fi
 
 ## secure_getenv and __secure_getenv
 
@@ -17454,7 +17468,12 @@ ac_compiler_gnu=$ac_cv_c_compiler_gnu
 
 
 
-case $ac_cv_func_which_gethostbyaddr_r in #(
+case $arch in #(
+  wasm64) :
+    { printf "%s\n" "$as_me:${as_lineno-$LINENO}: result: no" >&5
+printf "%s\n" "no" >&6; } ;; #(
+  *) :
+    case $ac_cv_func_which_gethostbyaddr_r in #(
   eight) :
     printf "%s\n" "#define HAS_GETHOSTBYADDR_R 8" >>confdefs.h
  ;; #(
@@ -17463,6 +17482,7 @@ case $ac_cv_func_which_gethostbyaddr_r in #(
  ;; #(
   *) :
      ;;
+esac ;;
 esac
 
 ## mkstemp

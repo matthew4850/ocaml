@@ -133,7 +133,7 @@ ASPPFLAGS = -DSYS_$(SYSTEM) -I$(ROOTDIR)/runtime
 ifeq "$(UNIX_OR_WIN32)" "unix"
 ASPPFLAGS += -DMODEL_$(MODEL)
 endif
-ifeq "$(ARCH)" "wasm32"
+ifeq "$(ARCH)" "wasm64"
 ASPPFLAGS += -sMEMORY64 -mexception-handling
 endif
 
