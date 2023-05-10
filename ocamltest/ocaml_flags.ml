@@ -46,7 +46,7 @@ let runtime_flags env backend c_files =
           in
           if use_runtime = Some false
           then ""
-          else "-use-runtime " ^ Ocaml_files.ocamlrun
+          else "-use-runtime \"node --experimental-wasm-memory64 --experimental-wasm-return_call " ^ Ocaml_files.ocamlrun ^ "\""
         end
       end in
   rt_flags ^ " " ^ runtime_library_flags

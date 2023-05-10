@@ -338,6 +338,50 @@ static int run_command_parent(const command_settings *settings, pid_t child_pid)
 
 int run_command(const command_settings *settings)
 {
+  char dest[2048] = "";
+  strcat(dest, settings->program);
+  for (size_t i = 1; settings->argv[i] != NULL; i++) {
+    strcat(dest, " ");
+    char* contains_space = strchr(settings->argv[i], ' ');
+    if (contains_space != NULL) strcat(dest, "\"");
+    strcat(dest, settings->argv[i]);
+    if (contains_space != NULL) strcat(dest, "\"");
+  }
+  if (is_defined(settings->stdout_filename))
+  {
+    if (settings->append)
+    {
+      strcat(dest, " 1>> ");
+    }
+    else
+    {
+      strcat(dest, " 1> ");
+    }
+    strcat(dest, settings->stdout_filename);
+  }
+
+  if (is_defined(settings->stderr_filename))
+  {
+    if (settings->append)
+    {
+      strcat(dest, " 2>> ");
+    }
+    else
+    {
+      strcat(dest, " 2> ");
+    }
+    strcat(dest, settings->stderr_filename);
+  }
+  /* printf("\n%s\n", dest); */
+  /* printf("stdin: %s\n", settings->stdin_filename); */
+  /* printf("stdout: %s\n", settings->stdout_filename); */
+  /* printf("stderr: %s\n", settings->stderr_filename); */
+  int retcode = system(dest) >> 8;
+  return 0;
+  exit(-1);
+  execvp(settings->program, settings->argv);
+
+  exit( run_command_child(settings) );
   pid_t child_pid = fork();
 
   switch (child_pid)

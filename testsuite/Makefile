@@ -42,7 +42,7 @@ TESTLOG ?= _log
 ocamltest_directory := ../ocamltest
 
 ocamltest_program := $(or \
-  $(wildcard $(ocamltest_directory)/ocamltest.opt$(EXE)),\
+  node --experimental-wasm-memory64 --experimental-wasm-return_call  $(wildcard $(ocamltest_directory)/ocamltest.opt$(EXE)),\
   $(wildcard $(ocamltest_directory)/ocamltest$(EXE)))
 
 ifeq "$(UNIX_OR_WIN32)" "unix"

@@ -123,6 +123,12 @@ let run_cmd
     ?timeout
     log env original_cmd
   =
+  let original_cmd =
+    match original_cmd with
+    | hd :: _ when String.ends_with ~suffix:".byte" hd -> "/home/matthew/ocaml/runtime/ocamlrun" :: original_cmd
+    | _ -> original_cmd
+  in
+  let original_cmd = ["node"; "--experimental-wasm-memory64"; "--experimental-wasm-return_call"] @ original_cmd in
   let log_redirection std filename =
     if filename<>"" then
     begin

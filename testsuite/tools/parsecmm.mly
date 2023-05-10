@@ -181,6 +181,7 @@ fundecl:
            ]
            else [ Reduce_code_size ];
          fun_poll = Lambda.Default_poll;
+         fun_uses_env = false;
          fun_dbg = debuginfo ()} }
 ;
 fun_name:
