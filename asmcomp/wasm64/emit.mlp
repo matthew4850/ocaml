@@ -1,4 +1,4 @@
-# 2 "asmcomp/wasm32/emit.mlp"
+# 2 "asmcomp/wasm64/emit.mlp"
 [@@@warning "-27"]
 open Cmm
 open Arch
@@ -210,6 +210,7 @@ and wasm_control_flow =
   | Wloop of label
   | Wendloop
   | Wbranch of label
+  | Wtailrec of label
   | Wcondbranch of Mach.test * label
   | Wcondbranch3 of label option * label option * label option
   | Wswitch of label array
@@ -291,8 +292,8 @@ module Cfg : sig
       val set_body : t -> wasm_instruction list -> unit
     end
   type t
-  type control_flow = [\`Branch | \`Condbranch of test | \`Fake]
-  val cfg_of_instructions : Linear.instruction -> t
+  type control_flow = [\`Branch | \`Condbranch of test | \`Tailrec | \`Fake]
+  val cfg_of_instructions : Linear.fundecl -> t
   val dag_of_cfg : t -> t * (label * label) list
   val get_adjacent_nodes : t -> label -> label list
   val get_adjacent_try_catch_edges : t -> label -> (label * label) list
@@ -317,7 +318,7 @@ end = struct
     let set_body t body = t.body <- body
   end
 
-  type control_flow = [\`Branch | \`Condbranch of test | \`Fake ]
+  type control_flow = [\`Branch | \`Condbranch of test | \`Tailrec | \`Fake ]
 
   type t = {
     entry: label;
@@ -378,13 +379,13 @@ end = struct
     in
     dfs cfg f LblSet.empty;
     !back_edges
-  let cfg_of_instructions instructions =
+  let cfg_of_instructions fundecl =
     let convert { desc; next; arg; res; dbg; live } =
       let convert = function
       | Lprologue -> Wprologue
       | Lend -> Wend
       | Lop op -> Wop op
-      | Lreloadretaddr -> Wend (* assert false *)
+      | Lreloadretaddr -> assert false (* assert false *)
       | Lreturn -> Wreturn
       | Llabel _ -> assert false
       | Lbranch _ -> assert false
@@ -410,11 +411,16 @@ end = struct
     let trap_start = ref [] in
     (* let trap_end = ref [] in *)
     let rec instructions_to_cfg current current_lbl = function
-    | Linear.{ desc = Lend } -> add_cfg current_lbl current
+    | Linear.{ desc = Lend } as i -> add_cfg current_lbl (convert i :: current)
     | { desc = Lbranch lbl; next } as i ->
         let new_lbl = new_label () in
         add_cfg current_lbl current;
         edges := (current_lbl, new_lbl, None, \`Branch) :: (current_lbl, lbl, Some i, \`Branch) :: !edges;
+        instructions_to_cfg [] new_lbl next
+    | { desc = Lop(Itailcall_imm { func; }); next } as i when func = fundecl.fun_name  ->
+        let new_lbl = new_label () in
+        add_cfg current_lbl current;
+        edges := (current_lbl, new_lbl, None, \`Branch) :: (current_lbl, fundecl.fun_tailrec_entry_point_label, Some i, \`Tailrec) :: !edges;
         instructions_to_cfg [] new_lbl next
     | { desc = Lcondbranch (tst, lbl); next } as i ->
         let new_lbl = new_label () in
@@ -485,6 +491,8 @@ end = struct
         add_cfg current_lbl current;
         edges := (current_lbl, lbl, None, \`Branch) :: !edges;
         instructions_to_cfg [] lbl next
+    | { desc = Lreloadretaddr; next } ->
+        instructions_to_cfg current current_lbl next
     | { desc = Llabel lbl; next } ->
         add_cfg current_lbl current;
         edges := (current_lbl, lbl, None, \`Branch) :: !edges;
@@ -492,7 +500,7 @@ end = struct
     | Linear.{ next } as inst ->
         instructions_to_cfg (convert inst :: current) current_lbl next
     in
-    instructions_to_cfg [] entry instructions;
+    instructions_to_cfg [] entry fundecl.fun_body;
     assert (List.length !trap_start = 0);
     (* assert (0 = List.compare_lengths !trap_start !trap_end); *)
     (* let trap_start = !trap_start in *)
@@ -565,9 +573,9 @@ end
 
 let rec end_block = Structured.{ block = End; next = end_block }
 
-let cfg_reloop instructions : wasm_instruction list =
+let cfg_reloop fundecl =
   let open Structured in
-  let cfg = Cfg.cfg_of_instructions instructions in
+  let cfg = Cfg.cfg_of_instructions fundecl in
   let dag, back_edges = Cfg.dag_of_cfg cfg in
   let order = ref [] in
   let visited = Hashtbl.create 10 in
@@ -628,6 +636,7 @@ let cfg_reloop instructions : wasm_instruction list =
     let desc =
     match control_flow with
     | \`Branch -> Wbranch lbl
+    | \`Tailrec -> Wtailrec lbl
     | \`Condbranch tst -> Wcondbranch (tst, lbl)
    in
    let body = Cfg.Node.get_body node in
@@ -651,6 +660,7 @@ let cfg_reloop instructions : wasm_instruction list =
     | \`Fake -> ()
     | (\`Branch | \`Condbranch _)  as control_flow ->
         add_control_flow_body new_lbl control_flow instr node
+    | \`Tailrec -> assert false
   in
   let add_loop src_lbl dst_lbl =
     let new_lbl = new_label () in
@@ -663,7 +673,7 @@ let cfg_reloop instructions : wasm_instruction list =
     let node = Cfg.get_node cfg dst_lbl in
     match control_flow with
     | \`Fake -> assert false
-    | (\`Branch | \`Condbranch _)  as control_flow ->
+    | (\`Branch | \`Condbranch _ | \`Tailrec)  as control_flow ->
         add_control_flow_body new_lbl control_flow instr node
   in
   let rec insert_blocks = function
@@ -896,7 +906,7 @@ let emit_instr env i =
         cfi_adjust_cfa_offset n;
       end
   | Wend ->
-      ()
+      `	unreachable\n`
   | Wloop lbl ->
       push_lbl lbl;
       `	loop\n`
@@ -956,6 +966,15 @@ let emit_instr env i =
       `	br_table \{{emit_string (String.concat ", " (Array.to_list (Array.map (fun lbl -> Int.to_string (get_idx lbl)) jumptbl)))}}\n`
   | Wbranch lbl ->
       `#br {emit_label lbl}\n`;
+      let branch_idx = get_idx lbl in
+      `	br	{emit_int branch_idx}\n`
+  | Wtailrec lbl ->
+      assert ((Array.length i.arg) = (Array.length env.f.fun_args));
+      `#br {emit_label lbl}\n`;
+      Array.iter emit_get_reg i.arg;
+      for i = Array.length env.f.fun_args - 1 downto 0 do
+        (fun () -> ()) |> emit_set_reg (env.f.fun_args.(i));
+      done;
       let branch_idx = get_idx lbl in
       `	br	{emit_int branch_idx}\n`
   | Wcondbranch(tst, lbl) ->
@@ -1381,8 +1400,8 @@ let emit_args args =
 (* let rec emit_all env = function *)
 (*   | {desc = Lend} -> () | i -> emit_instr env i; emit_all env i.next *)
 
-let emit_all env instrs =
-  let instrs = match true with | true -> cfg_reloop instrs | false -> reloop instrs in
+let emit_all env fundecl =
+  let instrs = match true with | true -> cfg_reloop fundecl | false -> reloop fundecl.fun_body in
   List.iter (emit_instr env) instrs
 
 module RegOrder =
@@ -1494,7 +1513,7 @@ let fundecl fundecl =
   emit_locals fundecl;
   emit_debug_info fundecl.fun_dbg;
   cfi_startproc();
-  emit_all env fundecl.fun_body;
+  emit_all env fundecl;
   `	end_function\n`;
   (* List.iter emit_call_gc env.call_gc_sites; *)
   (* List.iter emit_call_bound_error env.bound_error_sites; *)
